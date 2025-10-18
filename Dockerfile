@@ -39,6 +39,9 @@ WORKDIR /app
 COPY package*.json .
 COPY db            db
 
+# Copy LICENSE and README (required by MIT License)
+COPY LICENSE README.md ./
+
 # Copy built files and production node_modules from builder
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/public ./public

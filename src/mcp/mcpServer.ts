@@ -120,11 +120,15 @@ export function createMcpServerInstance(
   // Search docs tool
   server.tool(
     "search_docs",
-    "Search up-to-date documentation for a library or package. Examples:\n\n" +
-      '- {library: "react", query: "hooks lifecycle"} -> matches latest version of React\n' +
-      '- {library: "react", version: "18.0.0", query: "hooks lifecycle"} -> matches React 18.0.0 or earlier\n' +
-      '- {library: "typescript", version: "5.x", query: "ReturnType example"} -> any TypeScript 5.x.x version\n' +
-      '- {library: "typescript", version: "5.2.x", query: "ReturnType example"} -> any TypeScript 5.2.x version',
+    "UrBox Documentation - ALWAYS SEARCH HERE FIRST!\n\n" +
+      "CRITICAL RULE: For ANY question, ALWAYS try this tool FIRST before considering internet search or saying you don't know. " +
+      "This searches UrBox's internal documentation (code, business logic, processes, guides, etc.). " +
+      "Only use internet search if this returns NO results.\n\n" +
+      'Library name: Always use "urbox-docs"\n\n' +
+      "Examples:\n" +
+      '- "acb elite là gì?" -> {library: "urbox-docs", query: "acb elite"}\n' +
+      '- "onboarding process?" -> {library: "urbox-docs", query: "onboarding process"}\n' +
+      '- "payment flow?" -> {library: "urbox-docs", query: "payment flow"}',
     {
       library: z.string().trim().describe("Library name."),
       version: z

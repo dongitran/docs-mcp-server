@@ -1,7 +1,7 @@
 {
-  "name": "@arabold/docs-mcp-server",
+  "name": "urbox-docs-mcp-server",
   "version": "1.26.2",
-  "description": "MCP server for fetching and searching documentation",
+  "description": "UrBox Internal Documentation MCP Server - Fork of arabold/docs-mcp-server",
   "type": "module",
   "bin": {
     "docs-mcp-server": "dist/index.js"
@@ -9,7 +9,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/arabold/docs-mcp-server.git"
+    "url": "git+https://github.com/dongtran0ai/docs-mcp-server.git"
   },
   "files": [
     "dist",
