@@ -1,10 +1,12 @@
-# Docs MCP Server: Your AI's Up-to-Date Documentation Expert
+# UrBox Document Server
 
-AI coding assistants often struggle with outdated documentation and hallucinations. The **Docs MCP Server** solves this by providing a personal, always-current knowledge base for your AI. It **indexes 3rd party documentation** from various sources (websites, GitHub, npm, PyPI, local files) and offers powerful, version-aware search tools via the Model Context Protocol (MCP).
+> **Fork of [arabold/docs-mcp-server](https://github.com/arabold/docs-mcp-server)** - Customized for UrBox internal documentation management.
+
+AI coding assistants often struggle with outdated documentation and hallucinations. The **UrBox Document Server** solves this by providing a personal, always-current knowledge base for your AI. It **indexes 3rd party documentation** from various sources (websites, GitHub, npm, PyPI, local files) and offers powerful, version-aware search tools via the Model Context Protocol (MCP).
 
 This enables your AI agent to access the **latest official documentation**, dramatically improving the quality and reliability of generated code and integration details. It's **free**, **open-source**, runs **locally** for privacy, and integrates seamlessly into your development workflow.
 
-## Why Use the Docs MCP Server?
+## Why Use UrBox Document Server?
 
 LLM-assisted coding promises speed and efficiency, but often falls short due to:
 
@@ -13,7 +15,7 @@ LLM-assisted coding promises speed and efficiency, but often falls short due to:
 - ❓ **Version Ambiguity:** Generic answers rarely account for the specific version dependencies in your project, leading to subtle bugs.
 - ⏳ **Verification Overhead:** Developers spend valuable time double-checking AI suggestions against official documentation.
 
-**Docs MCP Server solves these problems by:**
+**UrBox Document Server solves these problems by:**
 
 - ✅ **Providing Up-to-Date Context:** Fetches and indexes documentation directly from official sources (websites, GitHub, npm, PyPI, local files) on demand.
 - 🎯 **Delivering Version-Specific Answers:** Search queries can target exact library versions, ensuring information matches your project's dependencies.
@@ -35,9 +37,9 @@ LLM-assisted coding promises speed and efficiency, but often falls short due to:
 
 > **What is semantic chunking?**
 >
-> Semantic chunking splits documentation into meaningful sections based on structure—like headings, code blocks, and tables—rather than arbitrary text size. Docs MCP Server preserves logical boundaries, keeps code and tables intact, and removes navigation clutter from HTML docs. This ensures LLMs receive coherent, context-rich information for more accurate and relevant answers.
+> Semantic chunking splits documentation into meaningful sections based on structure—like headings, code blocks, and tables—rather than arbitrary text size. UrBox Document Server preserves logical boundaries, keeps code and tables intact, and removes navigation clutter from HTML docs. This ensures LLMs receive coherent, context-rich information for more accurate and relevant answers.
 
-## How to Run the Docs MCP Server
+## How to Run UrBox Document Server
 
 Choose your deployment method:
 
@@ -56,9 +58,9 @@ Run a standalone server that includes both MCP endpoints and web interface in a 
 
    ```bash
    docker run --rm \
-     -v docs-mcp-data:/data \
+     -v urbox-docs-data:/data \
      -p 6280:6280 \
-     ghcr.io/arabold/docs-mcp-server:latest \
+     ghcr.io/dongtran0ai/docs-mcp-server:latest \
      --protocol http --host 0.0.0.0 --port 6280
    ```
 
@@ -70,7 +72,7 @@ Run a standalone server that includes both MCP endpoints and web interface in a 
 2. **Start the server:**
 
    ```bash
-   npx @arabold/docs-mcp-server@latest
+   npx urbox-docs-mcp-server@latest
    ```
 
    This will run the server on port 6280 by default.
@@ -84,7 +86,7 @@ Add this to your MCP settings (VS Code, Claude Desktop, etc.):
 ```json
 {
   "mcpServers": {
-    "docs-mcp-server": {
+    "urbox-document-server": {
       "type": "sse",
       "url": "http://localhost:6280/sse",
       "disabled": false,
@@ -116,13 +118,13 @@ You can also use CLI commands to interact with the local database:
 
 ```bash
 # List indexed libraries
-OPENAI_API_KEY="your-key" npx @arabold/docs-mcp-server@latest list
+OPENAI_API_KEY="your-key" npx urbox-docs-mcp-server@latest list
 
 # Search documentation
-OPENAI_API_KEY="your-key" npx @arabold/docs-mcp-server@latest search react "useState hook"
+OPENAI_API_KEY="your-key" npx urbox-docs-mcp-server@latest search react "useState hook"
 
 # Scrape new documentation (connects to running server's worker)
-npx @arabold/docs-mcp-server@latest scrape react https://react.dev/reference/react --server-url http://localhost:6280/api
+npx urbox-docs-mcp-server@latest scrape react https://react.dev/reference/react --server-url http://localhost:6280/api
 ```
 
 ### Adding Library Documentation
@@ -135,7 +137,7 @@ npx @arabold/docs-mcp-server@latest scrape react https://react.dev/reference/rea
 
 Once a job completes, the docs are searchable via your AI assistant or the Web UI.
 
-![Docs MCP Server Web Interface](docs/docs-mcp-server.png)
+![UrBox Document Server Web Interface](docs/docs-mcp-server.png)
 
 **Benefits:**
 
@@ -157,9 +159,9 @@ Add this to your MCP settings (VS Code, Claude Desktop, etc.):
 ```json
 {
   "mcpServers": {
-    "docs-mcp-server": {
+    "urbox-document-server": {
       "command": "npx",
-      "args": ["@arabold/docs-mcp-server@latest"],
+      "args": ["urbox-docs-mcp-server@latest"],
       "disabled": false,
       "autoApprove": []
     }
@@ -172,9 +174,9 @@ Add this to your MCP settings (VS Code, Claude Desktop, etc.):
 ```json
 {
   "mcpServers": {
-    "docs-mcp-server": {
+    "urbox-document-server": {
       "command": "npx",
-      "args": ["@arabold/docs-mcp-server@latest"],
+      "args": ["urbox-docs-mcp-server@latest"],
       "env": {
         "OPENAI_API_KEY": "sk-proj-..." // Your OpenAI API key
       },
@@ -202,7 +204,7 @@ Please scrape the React documentation from https://react.dev/reference/react for
 Start a temporary web interface that shares the same database:
 
 ```bash
-OPENAI_API_KEY="your-key" npx @arabold/docs-mcp-server@latest web --port 6281
+OPENAI_API_KEY="your-key" npx urbox-docs-mcp-server@latest web --port 6281
 ```
 
 Then open `http://localhost:6281` to manage documentation. Stop the web interface when done (`Ctrl+C`).
@@ -213,10 +215,10 @@ Use CLI commands directly (avoid running scrape jobs concurrently with embedded 
 
 ```bash
 # List libraries
-OPENAI_API_KEY="your-key" npx @arabold/docs-mcp-server@latest list
+OPENAI_API_KEY="your-key" npx urbox-docs-mcp-server@latest list
 
 # Search documentation
-OPENAI_API_KEY="your-key" npx @arabold/docs-mcp-server@latest search react "useState hook"
+OPENAI_API_KEY="your-key" npx urbox-docs-mcp-server@latest search react "useState hook"
 ```
 
 **Benefits:**
@@ -253,9 +255,9 @@ You can index documentation from your local filesystem by using a `file://` URL 
     docker run --rm \
       -e OPENAI_API_KEY="your-key" \
       -v /absolute/path/to/docs:/docs:ro \
-      -v docs-mcp-data:/data \
+      -v urbox-docs-data:/data \
       -p 6280:6280 \
-      ghcr.io/arabold/docs-mcp-server:latest \
+      ghcr.io/dongtran0ai/docs-mcp-server:latest \
       scrape mylib file:///docs/my-library
     ```
   - In the Web UI, enter the path as `file:///docs/my-library` (matching the container path).
@@ -270,7 +272,7 @@ For production deployments or when you need to scale processing, use Docker Comp
 
 ```bash
 # Clone the repository (to get docker-compose.yml)
-git clone https://github.com/arabold/docs-mcp-server.git
+git clone https://github.com/dongtran0ai/docs-mcp-server.git
 cd docs-mcp-server
 
 # Set your environment variables
@@ -291,7 +293,7 @@ docker compose up -d
 ```json
 {
   "mcpServers": {
-    "docs-mcp-server": {
+    "urbox-document-server": {
       "type": "sse",
       "url": "http://localhost:6280/sse",
       "disabled": false,
@@ -321,7 +323,7 @@ This architecture allows independent scaling of processing (workers) and user in
 
 ## Configuration
 
-The Docs MCP Server can run without any configuration and will use full-text search only. To enable vector search for improved results, configure an embedding provider via environment variables.
+UrBox Document Server can run without any configuration and will use full-text search only. To enable vector search for improved results, configure an embedding provider via environment variables.
 
 ### Command Line Argument Overrides
 
@@ -349,15 +351,15 @@ Many CLI arguments can be overridden using environment variables. This is useful
 export DOCS_MCP_PORT=8080
 export DOCS_MCP_HOST=0.0.0.0
 export DOCS_MCP_EMBEDDING_MODEL=text-embedding-3-small
-npx @arabold/docs-mcp-server@latest
+npx urbox-docs-mcp-server@latest
 
 # Override with CLI arguments (takes precedence)
-DOCS_MCP_PORT=8080 npx @arabold/docs-mcp-server@latest --port 9090
+DOCS_MCP_PORT=8080 npx urbox-docs-mcp-server@latest --port 9090
 ```
 
 ### Embedding Provider Configuration
 
-The Docs MCP Server is configured via environment variables. Set these in your shell, Docker, or MCP client config.
+UrBox Document Server is configured via environment variables. Set these in your shell, Docker, or MCP client config.
 
 | Variable                           | Description                                           |
 | ---------------------------------- | ----------------------------------------------------- |
@@ -397,7 +399,7 @@ Here are complete configuration examples for different embedding providers:
 ```bash
 OPENAI_API_KEY="sk-proj-your-openai-api-key" \
 DOCS_MCP_EMBEDDING_MODEL="text-embedding-3-small" \
-npx @arabold/docs-mcp-server@latest
+npx urbox-docs-mcp-server@latest
 ```
 
 **Ollama (Local):**
@@ -406,7 +408,7 @@ npx @arabold/docs-mcp-server@latest
 OPENAI_API_KEY="ollama" \
 OPENAI_API_BASE="http://localhost:11434/v1" \
 DOCS_MCP_EMBEDDING_MODEL="nomic-embed-text" \
-npx @arabold/docs-mcp-server@latest
+npx urbox-docs-mcp-server@latest
 ```
 
 **LM Studio (Local):**
@@ -415,7 +417,7 @@ npx @arabold/docs-mcp-server@latest
 OPENAI_API_KEY="lmstudio" \
 OPENAI_API_BASE="http://localhost:1234/v1" \
 DOCS_MCP_EMBEDDING_MODEL="text-embedding-qwen3-embedding-4b" \
-npx @arabold/docs-mcp-server@latest
+npx urbox-docs-mcp-server@latest
 ```
 
 **Google Gemini:**
@@ -423,7 +425,7 @@ npx @arabold/docs-mcp-server@latest
 ```bash
 GOOGLE_API_KEY="your-google-api-key" \
 DOCS_MCP_EMBEDDING_MODEL="gemini:embedding-001" \
-npx @arabold/docs-mcp-server@latest
+npx urbox-docs-mcp-server@latest
 ```
 
 **Google Vertex AI:**
@@ -431,7 +433,7 @@ npx @arabold/docs-mcp-server@latest
 ```bash
 GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/gcp-service-account.json" \
 DOCS_MCP_EMBEDDING_MODEL="vertex:text-embedding-004" \
-npx @arabold/docs-mcp-server@latest
+npx urbox-docs-mcp-server@latest
 ```
 
 **AWS Bedrock:**
@@ -441,7 +443,7 @@ AWS_ACCESS_KEY_ID="your-aws-access-key-id" \
 AWS_SECRET_ACCESS_KEY="your-aws-secret-access-key" \
 AWS_REGION="us-east-1" \
 DOCS_MCP_EMBEDDING_MODEL="aws:amazon.titan-embed-text-v1" \
-npx @arabold/docs-mcp-server@latest
+npx urbox-docs-mcp-server@latest
 ```
 
 **Azure OpenAI:**
@@ -452,7 +454,7 @@ AZURE_OPENAI_API_INSTANCE_NAME="your-instance-name" \
 AZURE_OPENAI_API_DEPLOYMENT_NAME="your-deployment-name" \
 AZURE_OPENAI_API_VERSION="2024-02-01" \
 DOCS_MCP_EMBEDDING_MODEL="microsoft:text-embedding-ada-002" \
-npx @arabold/docs-mcp-server@latest
+npx urbox-docs-mcp-server@latest
 ```
 
 For more architectural details, see the [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -461,7 +463,7 @@ For enterprise authentication and security features, see the [Authentication Gui
 
 ## Telemetry
 
-The Docs MCP Server includes privacy-first telemetry to help improve the product. We collect anonymous usage data to understand how the tool is used and identify areas for improvement.
+UrBox Document Server includes privacy-first telemetry to help improve the product. We collect anonymous usage data to understand how the tool is used and identify areas for improvement.
 
 ### What We Collect
 
@@ -487,13 +489,13 @@ You can disable telemetry collection entirely:
 **Option 1: CLI Flag**
 
 ```bash
-npx @arabold/docs-mcp-server@latest --no-telemetry
+npx urbox-docs-mcp-server@latest --no-telemetry
 ```
 
 **Option 2: Environment Variable**
 
 ```bash
-DOCS_MCP_TELEMETRY=false npx @arabold/docs-mcp-server@latest
+DOCS_MCP_TELEMETRY=false npx urbox-docs-mcp-server@latest
 ```
 
 **Option 3: Docker**
@@ -501,16 +503,16 @@ DOCS_MCP_TELEMETRY=false npx @arabold/docs-mcp-server@latest
 ```bash
 docker run \
   -e DOCS_MCP_TELEMETRY=false \
-  -v docs-mcp-data:/data \
+  -v urbox-docs-data:/data \
   -p 6280:6280 \
-  ghcr.io/arabold/docs-mcp-server:latest
+  ghcr.io/dongtran0ai/docs-mcp-server:latest
 ```
 
 For more details about our telemetry practices, see the [Telemetry Guide](docs/telemetry.md).
 
 ## Development
 
-To develop or contribute to the Docs MCP Server:
+To develop or contribute to UrBox Document Server:
 
 - Fork the repository and create a feature branch.
 - Follow the code conventions in [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -523,7 +525,7 @@ For questions or suggestions, open an issue.
 
 For details on the project's architecture and design principles, please see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-_Notably, the vast majority of this project's code was generated by the AI assistant Cline, leveraging the capabilities of this very MCP server._
+_This project is forked from [arabold/docs-mcp-server](https://github.com/arabold/docs-mcp-server) and customized for UrBox internal use._
 
 ## License
 
