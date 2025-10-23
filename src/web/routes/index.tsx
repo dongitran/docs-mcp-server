@@ -12,7 +12,7 @@ export function registerIndexRoute(server: FastifyInstance) {
     return (
       "<!DOCTYPE html>" +
       (
-        <Layout title="MCP Docs">
+        <Layout title="UrBox Document Server">
           {/* Job Queue Section */}
           <section class="mb-4 p-4 bg-white rounded-lg shadow dark:bg-gray-800 border border-gray-300 dark:border-gray-600">
             <div class="flex items-center justify-between mb-2">

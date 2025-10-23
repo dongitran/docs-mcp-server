@@ -43,7 +43,7 @@ export function registerLibraryDetailRoutes(
         return (
           "<!DOCTYPE html>" +
           (
-            <Layout title={`MCP Docs - ${libraryInfo.name}`}>
+            <Layout title={`UrBox Docs - ${libraryInfo.name}`}>
               {/* Library Detail Card */}
               <LibraryDetailCard library={libraryInfo} />
 
