@@ -1,6 +1,6 @@
 {
   "name": "urbox-docs-mcp-server",
-  "version": "1.26.2",
+  "version": "1.27.0",
   "description": "UrBox Internal Documentation MCP Server - Fork of arabold/docs-mcp-server",
   "type": "module",
   "bin": {

@@ -35,7 +35,7 @@ export function createCliProgram(): Command {
   // Configure main program
   program
     .name("docs-mcp-server")
-    .description("Unified CLI, MCP Server, and Web Interface for Docs MCP Server.")
+    .description("Unified CLI, MCP Server, and Web Interface for UrBox Document Server.")
     .version(packageJson.version)
     // Mutually exclusive logging flags
     .addOption(

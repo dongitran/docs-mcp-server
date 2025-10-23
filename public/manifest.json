@@ -1,7 +1,7 @@
 {
-  "name": "MCP Docs Server",
-  "short_name": "MCP Docs",
-  "description": "Model Context Protocol Documentation Server",
+  "name": "UrBox Document Server",
+  "short_name": "UrBox Docs",
+  "description": "UrBox Internal Documentation Server",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",

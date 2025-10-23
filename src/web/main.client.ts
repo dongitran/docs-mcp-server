@@ -1,5 +1,5 @@
 /**
- * Bootstraps the client-side experience for the Docs MCP Server web UI.
+ * Bootstraps the client-side experience for the UrBox Document Server web UI.
  * Initializes Alpine stores, HTMX helpers, Flowbite components, and the
  * release checker that surfaces update notifications in the header.
  */
@@ -11,9 +11,9 @@ import htmx from "htmx.org";
 import { fallbackReleaseLabel, isVersionNewer } from "./utils/versionCheck";
 
 const LATEST_RELEASE_ENDPOINT =
-  "https://api.github.com/repos/arabold/docs-mcp-server/releases/latest";
+  "https://api.github.com/repos/dongtran0ai/docs-mcp-server/releases/latest";
 const LATEST_RELEASE_FALLBACK_URL =
-  "https://github.com/arabold/docs-mcp-server/releases/latest";
+  "https://github.com/dongtran0ai/docs-mcp-server/releases/latest";
 
 interface VersionUpdateConfig {
   currentVersion: string | null;
@@ -51,7 +51,7 @@ document.addEventListener("alpine:init", () => {
         const response = await fetch(LATEST_RELEASE_ENDPOINT, {
           headers: {
             Accept: "application/vnd.github+json",
-            "User-Agent": "docs-mcp-server-ui",
+            "User-Agent": "urbox-document-server-ui",
           },
         });
 
