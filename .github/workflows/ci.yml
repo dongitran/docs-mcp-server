@@ -14,14 +14,17 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '>=20.0.0' # Match engines requirement in package.json
-          cache: 'npm'
+          node-version: ">=20.0.0" # Match engines requirement in package.json
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
 
       - name: Run linter
         run: npm run lint
+
+      - name: Run type checker
+        run: npm run typecheck
 
   test:
     name: Test
@@ -34,8 +37,8 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '>=20.0.0'
-          cache: 'npm'
+          node-version: ">=20.0.0"
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
@@ -57,8 +60,8 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '>=20.0.0'
-          cache: 'npm'
+          node-version: ">=20.0.0"
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci

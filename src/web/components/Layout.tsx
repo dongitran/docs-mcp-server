@@ -1,12 +1,11 @@
 /**
  * Defines the shared HTML skeleton for all web pages, including the global
  * header with version badge and the hook for client-side update notifications.
- * The component resolves the current version from props or package metadata
+ * The component resolves the current version from props or build-time injection
  * and renders placeholders that AlpineJS hydrates at runtime.
  */
 import type { PropsWithChildren } from "@kitajs/html";
-import { readFileSync } from "node:fs";
-import { logger } from "../../utils/logger";
+import Toast from "./Toast";
 
 /**
  * Props for the Layout component.
@@ -15,29 +14,26 @@ interface LayoutProps extends PropsWithChildren {
   title: string;
   /** Optional version string to display next to the title. */
   version?: string;
+  /** Event client configuration for real-time updates */
+  eventClientConfig?: {
+    useRemoteWorker: boolean;
+    trpcUrl?: string;
+  };
 }
 
 /**
  * Base HTML layout component for all pages.
  * Includes common head elements, header, and scripts.
- * @param props - Component props including title, version, and children.
+ * @param props - Component props including title, version, children, and eventClientConfig.
  */
-const Layout = ({ title, version, children }: LayoutProps) => {
-  let versionString = version;
-  if (!versionString) {
-    // If no version is provided, use the version from package.json
-    // We cannot bake the version into the bundle, as the package.json will
-    // be updated by the build process, after the bundle is created.
-    try {
-      const packageJson = JSON.parse(readFileSync("package.json", "utf-8")) as {
-        version: string;
-      };
-      versionString = packageJson.version;
-      logger.debug(`Resolved version from package.json: ${versionString}`);
-    } catch (error) {
-      logger.error(`Error reading package.json: ${error}`);
-    }
-  }
+const Layout = ({
+  title,
+  version,
+  children,
+  eventClientConfig,
+}: LayoutProps) => {
+  // Use provided version prop, or fall back to build-time injected version
+  const versionString = version || __APP_VERSION__;
   const versionInitializer = `versionUpdate({ currentVersion: ${
     versionString ? `'${versionString}'` : "null"
   } })`;
@@ -153,7 +149,7 @@ const Layout = ({ title, version, children }: LayoutProps) => {
           `}
         </style>
       </head>
-      <body class="bg-gray-50 dark:bg-gray-900">
+      <body class="bg-gray-50 dark:bg-gray-900" hx-ext="morph">
         {/* Full-width header */}
         <header
           class="bg-white border-b border-gray-200 dark:bg-gray-800 dark:border-gray-700"
@@ -253,6 +249,11 @@ const Layout = ({ title, version, children }: LayoutProps) => {
         <div class="container max-w-2xl mx-auto px-4 py-6">
           <main>{children}</main>
         </div>
+
+        {/* Event client configuration */}
+        <script>
+          {`window.__EVENT_CLIENT_CONFIG__ = ${JSON.stringify(eventClientConfig)};`}
+        </script>
 
         {/* Bundled JS (includes Flowbite, HTMX, AlpineJS, and initialization) */}
         <script type="module" src="/assets/main.js"></script>

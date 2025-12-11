@@ -5,6 +5,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { EventBusService } from "../events";
 import type { IPipeline } from "../pipeline/trpc/interfaces";
 import type { DocumentManagementService } from "../store/DocumentManagementService";
 import { AppServer } from "./AppServer";
@@ -16,6 +17,10 @@ const mockFastify = vi.hoisted(() => ({
   listen: vi.fn(),
   close: vi.fn(),
   setErrorHandler: vi.fn(), // Add missing mock method
+  server: {
+    on: vi.fn(), // Mock HTTP server for WebSocket upgrade handling
+    closeAllConnections: vi.fn(), // Mock for forcing connection closure
+  },
 }));
 
 const mockMcpService = vi.hoisted(() => ({
@@ -25,6 +30,7 @@ const mockMcpService = vi.hoisted(() => ({
 
 const mockTrpcService = vi.hoisted(() => ({
   registerTrpcService: vi.fn(),
+  applyTrpcWebSocketHandler: vi.fn(),
 }));
 
 const mockWebService = vi.hoisted(() => ({
@@ -36,13 +42,6 @@ const mockWorkerService = vi.hoisted(() => ({
   stopWorkerService: vi.fn(),
 }));
 
-const mockLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
-
 // Apply mocks using hoisted values
 vi.mock("fastify", () => ({
   default: vi.fn(() => mockFastify),
@@ -52,7 +51,6 @@ vi.mock("../services/mcpService", () => mockMcpService);
 vi.mock("../services/trpcService", () => mockTrpcService);
 vi.mock("../services/webService", () => mockWebService);
 vi.mock("../services/workerService", () => mockWorkerService);
-vi.mock("../utils/logger", () => ({ logger: mockLogger }));
 vi.mock("../utils/paths", () => ({
   getProjectRoot: vi.fn(() => "/mock/project/root"),
 }));
@@ -63,14 +61,20 @@ describe("AppServer Behavior Tests", () => {
   let mockDocService: Partial<DocumentManagementService>;
   let mockPipeline: Partial<IPipeline>;
   let mockMcpServer: Partial<McpServer>;
+  let eventBus: EventBusService;
 
   beforeEach(() => {
+    eventBus = new EventBusService();
     // Reset all mocks before each test
     vi.clearAllMocks();
 
     // Setup mock dependencies
-    mockDocService = {};
-    mockPipeline = {};
+    mockDocService = {
+      getActiveEmbeddingConfig: vi.fn().mockReturnValue(null),
+    };
+    mockPipeline = {
+      setCallbacks: vi.fn(), // Add mock for setCallbacks method
+    };
     mockMcpServer = {};
 
     // Setup default mock returns
@@ -100,6 +104,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -122,6 +127,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -143,6 +149,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -163,6 +170,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -182,6 +190,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -203,6 +212,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -229,6 +239,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -238,6 +249,10 @@ describe("AppServer Behavior Tests", () => {
         mockFastify,
         mockDocService,
         mockPipeline,
+        eventBus,
+        {
+          externalWorkerUrl: undefined,
+        },
       );
       expect(mockWorkerService.registerWorkerService).toHaveBeenCalledWith(mockPipeline);
       expect(mockMcpService.registerMcpService).not.toHaveBeenCalled();
@@ -257,6 +272,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -288,6 +304,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -297,6 +314,7 @@ describe("AppServer Behavior Tests", () => {
         mockFastify,
         mockPipeline,
         mockDocService,
+        expect.any(Object), // eventBus
       );
       expect(mockWebService.registerWebService).not.toHaveBeenCalled();
       expect(mockMcpService.registerMcpService).not.toHaveBeenCalled();
@@ -316,6 +334,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -325,6 +344,10 @@ describe("AppServer Behavior Tests", () => {
         mockFastify,
         mockDocService,
         mockPipeline,
+        eventBus,
+        {
+          externalWorkerUrl: undefined,
+        },
       );
       expect(mockMcpService.registerMcpService).toHaveBeenCalledWith(
         mockFastify,
@@ -337,6 +360,7 @@ describe("AppServer Behavior Tests", () => {
         mockFastify,
         mockPipeline,
         mockDocService,
+        expect.any(Object), // eventBus
       );
       expect(mockWorkerService.registerWorkerService).toHaveBeenCalledWith(mockPipeline);
     });
@@ -354,6 +378,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -387,6 +412,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -399,7 +425,7 @@ describe("AppServer Behavior Tests", () => {
       expect(fastifyInstance).toBe(mockFastify);
     });
 
-    it("should log startup information with enabled services", async () => {
+    it("should successfully start server with all services enabled", async () => {
       const config: AppServerConfig = {
         enableWebInterface: true,
         enableMcpServer: true,
@@ -412,27 +438,27 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
-      await server.start();
+      const fastifyInstance = await server.start();
 
-      expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining("AppServer available at"),
-      );
-      expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining("Web interface:"),
-      );
-      expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining("MCP endpoints:"),
-      );
-      expect(mockLogger.info).toHaveBeenCalledWith(expect.stringContaining("API:"));
-      expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining("Embedded worker:"),
-      );
+      // Verify server started successfully
+      expect(fastifyInstance).toBe(mockFastify);
+      expect(mockFastify.listen).toHaveBeenCalledWith({
+        port: 3000,
+        host: "127.0.0.1",
+      });
+
+      // Verify all services were registered
+      expect(mockWebService.registerWebService).toHaveBeenCalled();
+      expect(mockMcpService.registerMcpService).toHaveBeenCalled();
+      expect(mockTrpcService.registerTrpcService).toHaveBeenCalled();
+      expect(mockWorkerService.registerWorkerService).toHaveBeenCalled();
     });
 
-    it("should log external worker URL when configured", async () => {
+    it("should successfully start server with external worker configured", async () => {
       const config: AppServerConfig = {
         enableWebInterface: true,
         enableMcpServer: false,
@@ -446,14 +472,19 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
-      await server.start();
+      const fastifyInstance = await server.start();
 
-      expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining("External worker: http://external-worker:8080"),
-      );
+      // Verify server started successfully
+      expect(fastifyInstance).toBe(mockFastify);
+      expect(mockFastify.listen).toHaveBeenCalled();
+
+      // Verify web service was registered but not embedded worker
+      expect(mockWebService.registerWebService).toHaveBeenCalled();
+      expect(mockWorkerService.registerWorkerService).not.toHaveBeenCalled();
     });
 
     it("should handle server startup failure gracefully", async () => {
@@ -472,14 +503,13 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
       await expect(server.start()).rejects.toThrow("Port already in use");
+      // Verify that cleanup was attempted
       expect(mockFastify.close).toHaveBeenCalled();
-      expect(mockLogger.error).toHaveBeenCalledWith(
-        expect.stringContaining("Failed to start AppServer"),
-      );
     });
   });
 
@@ -497,6 +527,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -506,9 +537,6 @@ describe("AppServer Behavior Tests", () => {
       expect(mockWorkerService.stopWorkerService).toHaveBeenCalledWith(mockPipeline);
       expect(mockMcpService.cleanupMcpService).toHaveBeenCalledWith(mockMcpServer);
       expect(mockFastify.close).toHaveBeenCalled();
-      expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining("AppServer stopped"),
-      );
     });
 
     it("should not stop worker service when not enabled", async () => {
@@ -524,6 +552,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -551,18 +580,15 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
       await server.start();
       await expect(server.stop()).rejects.toThrow("Cleanup failed");
 
+      // Verify that stopWorkerService was called before the error was thrown
       expect(mockWorkerService.stopWorkerService).toHaveBeenCalledWith(mockPipeline);
-      // Since the error is thrown immediately when stopWorkerService fails,
-      // the other cleanup operations won't be called
-      expect(mockLogger.error).toHaveBeenCalledWith(
-        expect.stringContaining("Failed to stop AppServer gracefully"),
-      );
     });
   });
 
@@ -580,6 +606,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
@@ -590,8 +617,8 @@ describe("AppServer Behavior Tests", () => {
         mockFastify,
         mockPipeline,
         mockDocService,
+        expect.any(Object), // eventBus
       );
-      expect(mockLogger.info).toHaveBeenCalledWith(expect.stringContaining("API:"));
     });
 
     it("should handle configuration with both embedded and external worker", async () => {
@@ -608,19 +635,14 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 
       await server.start();
 
-      // Embedded worker should take precedence
+      // Worker should take precedence - external worker should not be registered
       expect(mockWorkerService.registerWorkerService).toHaveBeenCalledWith(mockPipeline);
-      expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining("Embedded worker: enabled"),
-      );
-      expect(mockLogger.info).not.toHaveBeenCalledWith(
-        expect.stringContaining("External worker:"),
-      );
     });
 
     it("should validate port number boundaries", async () => {
@@ -636,6 +658,7 @@ describe("AppServer Behavior Tests", () => {
       const server = new AppServer(
         mockDocService as DocumentManagementService,
         mockPipeline as IPipeline,
+        eventBus,
         config,
       );
 

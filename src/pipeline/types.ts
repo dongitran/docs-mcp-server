@@ -1,6 +1,9 @@
-import type { ScraperProgress } from "../scraper/types";
-import type { VersionScraperOptions, VersionStatus } from "../store/types";
-import type { Document } from "../types"; // Use local Document type
+import type {
+  ScrapeResult,
+  ScraperOptions,
+  ScraperProgressEvent,
+} from "../scraper/types";
+import type { VersionStatus } from "../store/types";
 
 /**
  * Represents the possible states of a pipeline job.
@@ -28,7 +31,7 @@ export interface PipelineJob {
   /** Current pipeline status of the job. */
   status: PipelineJobStatus;
   /** Detailed progress information. */
-  progress: ScraperProgress | null;
+  progress: ScraperProgressEvent | null;
   /** Error information if the job failed. */
   error: { message: string } | null;
   /** Timestamp when the job was created. */
@@ -52,18 +55,24 @@ export interface PipelineJob {
   /** Original scraping URL. */
   sourceUrl: string | null;
   /** Stored scraper options for reproducibility. */
-  scraperOptions: VersionScraperOptions | null;
+  scraperOptions: ScraperOptions | null;
 }
 
 /**
  * Internal pipeline job representation used within PipelineManager.
  * Contains non-serializable fields for job management and control.
+ *
+ * Note: scraperOptions is required (non-nullable) for internal jobs as they
+ * always have complete runtime configuration available.
  */
-export interface InternalPipelineJob extends Omit<PipelineJob, "version" | "error"> {
+export interface InternalPipelineJob
+  extends Omit<PipelineJob, "version" | "error" | "scraperOptions"> {
   /** The library version associated with the job (internal uses string). */
   version: string;
   /** Error object if the job failed. */
   error: Error | null;
+  /** Complete scraper options with runtime configuration. */
+  scraperOptions: ScraperOptions;
   /** AbortController to signal cancellation. */
   abortController: AbortController;
   /** Promise that resolves/rejects when the job finishes. */
@@ -77,16 +86,14 @@ export interface InternalPipelineJob extends Omit<PipelineJob, "version" | "erro
 /**
  * Defines the structure for callback functions used with the PipelineManager.
  * Allows external components to hook into job lifecycle events.
+ * All callbacks receive the public PipelineJob representation to maintain
+ * clean separation between internal implementation and external API.
  */
 export interface PipelineManagerCallbacks {
   /** Callback triggered when a job's status changes. */
-  onJobStatusChange?: (job: InternalPipelineJob) => Promise<void>;
+  onJobStatusChange?: (job: PipelineJob) => Promise<void>;
   /** Callback triggered when a job makes progress. */
-  onJobProgress?: (job: InternalPipelineJob, progress: ScraperProgress) => Promise<void>;
+  onJobProgress?: (job: PipelineJob, progress: ScraperProgressEvent) => Promise<void>;
   /** Callback triggered when a job encounters an error during processing (e.g., storing a doc). */
-  onJobError?: (
-    job: InternalPipelineJob,
-    error: Error,
-    document?: Document,
-  ) => Promise<void>;
+  onJobError?: (job: PipelineJob, error: Error, page?: ScrapeResult) => Promise<void>;
 }

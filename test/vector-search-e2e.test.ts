@@ -16,6 +16,7 @@ import { SearchTool } from "../src/tools/SearchTool";
 import { createLocalDocumentManagement } from "../src/store";
 import { PipelineFactory } from "../src/pipeline/PipelineFactory";
 import { EmbeddingConfig, type EmbeddingModelConfig } from "../src/store/embeddings/EmbeddingConfig";
+import { EventBusService } from "../src/events";
 
 // Load environment variables from .env file
 config();
@@ -30,7 +31,7 @@ describe("Vector Search End-to-End Tests", () => {
   beforeAll(async () => {
     // Skip this test suite if no embedding configuration is available
     if (!process.env.OPENAI_API_KEY && !process.env.GOOGLE_API_KEY) {
-      console.log("⚠️ Skipping vector search tests - no embedding API key found");
+      console.log("⚠️  Skipping vector search tests - no embedding API key found");
       return;
     }
 
@@ -49,10 +50,11 @@ describe("Vector Search End-to-End Tests", () => {
     }
 
     // Initialize DocumentManagementService with temporary directory and embedding config
-    docService = await createLocalDocumentManagement(tempDir, embeddingConfig);
+    const eventBus = new EventBusService();
+    docService = await createLocalDocumentManagement(tempDir, eventBus, embeddingConfig);
 
     // Create pipeline for ScrapeTool
-    pipeline = await PipelineFactory.createPipeline(docService);
+    pipeline = await PipelineFactory.createPipeline(docService, eventBus);
     await pipeline.start();
 
     // Initialize tools
@@ -80,7 +82,7 @@ describe("Vector Search End-to-End Tests", () => {
   it("should scrape local README.md and make it searchable", async () => {
     // Skip if no embedding configuration
     if (!process.env.OPENAI_API_KEY && !process.env.GOOGLE_API_KEY) {
-      console.log("⚠️ Skipping test - no embedding API key found");
+      console.log("⚠️  Skipping test - no embedding API key found");
       return;
     }
 
@@ -152,7 +154,7 @@ describe("Vector Search End-to-End Tests", () => {
   it("should handle version-specific searches", async () => {
     // Skip if no embedding configuration
     if (!process.env.OPENAI_API_KEY && !process.env.GOOGLE_API_KEY) {
-      console.log("⚠️ Skipping test - no embedding API key found");
+      console.log("⚠️  Skipping test - no embedding API key found");
       return;
     }
 
@@ -178,7 +180,7 @@ describe("Vector Search End-to-End Tests", () => {
   it("should find semantic similarities beyond exact text matches", async () => {
     // Skip if no embedding configuration
     if (!process.env.OPENAI_API_KEY && !process.env.GOOGLE_API_KEY) {
-      console.log("⚠️ Skipping test - no embedding API key found");
+      console.log("⚠️  Skipping test - no embedding API key found");
       return;
     }
 
@@ -204,7 +206,7 @@ describe("Vector Search End-to-End Tests", () => {
   it("should handle non-existent library searches gracefully", async () => {
     // Skip if no embedding configuration
     if (!process.env.OPENAI_API_KEY && !process.env.GOOGLE_API_KEY) {
-      console.log("⚠️ Skipping test - no embedding API key found");
+      console.log("⚠️  Skipping test - no embedding API key found");
       return;
     }
 
@@ -212,13 +214,13 @@ describe("Vector Search End-to-End Tests", () => {
       library: "non-existent-library",
       version: "1.0.0", 
       query: "test query",
-    })).rejects.toThrow("Library 'non-existent-library' not found");
+    })).rejects.toThrow("Library non-existent-library not found in store. Did you mean: test-library?");
   }, 10000);
 
   it("should handle non-existent version searches gracefully", async () => {
     // Skip if no embedding configuration
     if (!process.env.OPENAI_API_KEY && !process.env.GOOGLE_API_KEY) {
-      console.log("⚠️ Skipping test - no embedding API key found");
+      console.log("⚠️  Skipping test - no embedding API key found");
       return;
     }
 

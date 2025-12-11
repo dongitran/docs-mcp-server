@@ -2,9 +2,10 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ScrapeTool } from "../../../tools/ScrapeTool";
 import { ScrapeMode } from "../../../scraper/types";
 import { logger } from "../../../utils/logger";
-import ScrapeForm from "../../components/ScrapeForm";
+import AddJobButton from "../../components/AddJobButton";
+import AddVersionButton from "../../components/AddVersionButton";
 import Alert from "../../components/Alert";
-import ScrapeFormContent from "../../components/ScrapeFormContent";
+import ScrapeForm from "../../components/ScrapeForm";
 import { DEFAULT_EXCLUSION_PATTERNS } from "../../../scraper/utils/defaultPatterns";
 import { ValidationError } from "../../../tools/errors";
 
@@ -23,6 +24,11 @@ export function registerNewJobRoutes(
     return <ScrapeForm defaultExcludePatterns={DEFAULT_EXCLUSION_PATTERNS} />;
   });
 
+  // GET /web/jobs/new-button - Return just the button to collapse the form
+  server.get("/web/jobs/new-button", async () => {
+    return <AddJobButton />;
+  });
+
   // POST /web/jobs/scrape - Queue a new scrape job
   server.post(
     "/web/jobs/scrape",
@@ -32,6 +38,7 @@ export function registerNewJobRoutes(
           url: string;
           library: string;
           version?: string;
+          formMode?: "new" | "add-version"; // Hidden field indicating form context
           maxPages?: string;
           maxDepth?: string;
           scope?: "subpages" | "hostname" | "domain";
@@ -88,11 +95,19 @@ export function registerNewJobRoutes(
           return Object.keys(headers).length > 0 ? headers : undefined;
         }
 
+        // Normalize version: treat "latest", empty string, or whitespace-only as null (latest)
+        const normalizedVersion =
+          !body.version ||
+          body.version.trim() === "" ||
+          body.version.trim().toLowerCase() === "latest"
+            ? null
+            : body.version.trim();
+
         // Prepare options for ScrapeTool
         const scrapeOptions = {
           url: body.url,
           library: body.library,
-          version: body.version || null, // Handle empty string as null
+          version: normalizedVersion,
           waitForCompletion: false, // Don't wait in UI
           options: {
             maxPages: body.maxPages
@@ -116,27 +131,22 @@ export function registerNewJobRoutes(
         const result = await scrapeTool.execute(scrapeOptions);
 
         if ("jobId" in result) {
-          // Success: Use Alert component and OOB swap
-          return (
-            <>
-              {/* Main target response */}
-              <Alert
-                type="success"
-                message={
-                  <>
-                    Job queued successfully! ID:{" "}
-                    <span safe>{result.jobId}</span>
-                  </>
-                }
-              />
-              {/* OOB target response - contains only the inner form content */}
-              <div id="scrape-form-container" hx-swap-oob="innerHTML">
-                <ScrapeFormContent
-                  defaultExcludePatterns={DEFAULT_EXCLUSION_PATTERNS}
-                />
-              </div>
-            </>
+          // Success: Collapse form back to button and show toast via HX-Trigger
+          const versionDisplay = normalizedVersion || "latest";
+          reply.header(
+            "HX-Trigger",
+            JSON.stringify({
+              toast: {
+                message: `Indexing started for ${body.library}@${versionDisplay}`,
+                type: "success",
+              },
+            })
           );
+          // Return the appropriate button based on the form mode
+          if (body.formMode === "add-version") {
+            return <AddVersionButton libraryName={body.library} />;
+          }
+          return <AddJobButton />;
         }
 
         // This case shouldn't happen with waitForCompletion: false, but handle defensively
@@ -147,7 +157,7 @@ export function registerNewJobRoutes(
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : "Unknown error";
-        logger.error(`Scrape job submission failed: ${error}`);
+        logger.error(`❌ Scrape job submission failed: ${error}`);
 
         // Use appropriate HTTP status code based on error type
         if (error instanceof ValidationError) {

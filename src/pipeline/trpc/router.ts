@@ -7,9 +7,9 @@
  */
 
 import { initTRPC } from "@trpc/server";
+import superjson from "superjson";
 import { z } from "zod";
 import type { ScraperOptions } from "../../scraper/types";
-import { analytics, TelemetryEvent } from "../../telemetry";
 import { PipelineJobStatus } from "../types";
 import type { IPipeline } from "./interfaces";
 
@@ -18,7 +18,9 @@ export interface PipelineTrpcContext {
   pipeline: IPipeline;
 }
 
-const t = initTRPC.context<PipelineTrpcContext>().create();
+const t = initTRPC.context<PipelineTrpcContext>().create({
+  transformer: superjson,
+});
 
 // Schemas
 const nonEmptyTrimmed = z
@@ -31,10 +33,15 @@ const optionalTrimmed = z.preprocess(
   z.string().min(1).optional().nullable(),
 );
 
-const enqueueInput = z.object({
+const enqueueScrapeInput = z.object({
   library: nonEmptyTrimmed,
   version: optionalTrimmed,
   options: z.custom<ScraperOptions>(),
+});
+
+const enqueueRefreshInput = z.object({
+  library: nonEmptyTrimmed,
+  version: optionalTrimmed,
 });
 
 const jobIdInput = z.object({ id: z.string().min(1) });
@@ -47,37 +54,42 @@ const getJobsInput = z.object({
 export function createPipelineRouter(trpc: unknown) {
   const tt = trpc as typeof t;
   return tt.router({
-    enqueueJob: tt.procedure
-      .input(enqueueInput)
+    ping: tt.procedure.query(async () => ({ status: "ok", ts: Date.now() })),
+
+    enqueueScrapeJob: tt.procedure
+      .input(enqueueScrapeInput)
       .mutation(
         async ({
           ctx,
           input,
         }: {
           ctx: PipelineTrpcContext;
-          input: z.infer<typeof enqueueInput>;
+          input: z.infer<typeof enqueueScrapeInput>;
         }) => {
-          const jobId = await ctx.pipeline.enqueueJob(
+          const jobId = await ctx.pipeline.enqueueScrapeJob(
             input.library,
             input.version ?? null,
             input.options,
           );
 
-          // Track Web UI scrape start
-          analytics.track(TelemetryEvent.WEB_SCRAPE_STARTED, {
-            library: input.library,
-            version: input.version || undefined,
-            url: input.options.url,
-            scope: input.options.scope || "subpages",
-            maxDepth: input.options.maxDepth || 3,
-            maxPages: input.options.maxPages || 1000,
-            maxConcurrency: input.options.maxConcurrency,
-            ignoreErrors: input.options.ignoreErrors,
-            scrapeMode: input.options.scrapeMode,
-            hasCustomHeaders: !!(
-              input.options.headers && Object.keys(input.options.headers).length > 0
-            ),
-          });
+          return { jobId };
+        },
+      ),
+
+    enqueueRefreshJob: tt.procedure
+      .input(enqueueRefreshInput)
+      .mutation(
+        async ({
+          ctx,
+          input,
+        }: {
+          ctx: PipelineTrpcContext;
+          input: z.infer<typeof enqueueRefreshInput>;
+        }) => {
+          const jobId = await ctx.pipeline.enqueueRefreshJob(
+            input.library,
+            input.version ?? null,
+          );
 
           return { jobId };
         },

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { EventBusService } from "../events/EventBusService";
 import type { DocumentManagementService } from "../store";
 import { PipelineClient } from "./PipelineClient";
 import { PipelineFactory } from "./PipelineFactory";
@@ -7,14 +8,16 @@ import { PipelineManager } from "./PipelineManager";
 // Mock dependencies
 vi.mock("./PipelineManager");
 vi.mock("./PipelineClient");
-vi.mock("../utils/logger");
+vi.mock("../events/EventBusService");
 
 describe("PipelineFactory", () => {
   let mockDocService: Partial<DocumentManagementService>;
+  let mockEventBus: EventBusService;
 
   beforeEach(() => {
     vi.resetAllMocks();
     mockDocService = {};
+    mockEventBus = new EventBusService();
   });
 
   describe("createPipeline", () => {
@@ -23,10 +26,12 @@ describe("PipelineFactory", () => {
 
       const pipeline = await PipelineFactory.createPipeline(
         mockDocService as DocumentManagementService,
+        mockEventBus,
         options,
       );
 
-      expect(PipelineManager).toHaveBeenCalledWith(mockDocService, 5, {
+      // Should have called PipelineManager with store, eventBus, concurrency, and options
+      expect(PipelineManager).toHaveBeenCalledWith(mockDocService, mockEventBus, 5, {
         recoverJobs: true,
       });
       expect(PipelineClient).not.toHaveBeenCalled();
@@ -39,11 +44,12 @@ describe("PipelineFactory", () => {
       const options = { serverUrl: "http://localhost:8080", concurrency: 3 };
 
       const pipeline = await PipelineFactory.createPipeline(
-        mockDocService as DocumentManagementService,
+        undefined,
+        mockEventBus,
         options,
       );
 
-      expect(PipelineClient).toHaveBeenCalledWith("http://localhost:8080");
+      expect(PipelineClient).toHaveBeenCalledWith("http://localhost:8080", mockEventBus);
       expect(PipelineManager).not.toHaveBeenCalled();
       // Behavior: returned instance is the one constructed by PipelineClient
       const ClientMock = PipelineClient as unknown as { mock: { instances: any[] } };
@@ -51,9 +57,13 @@ describe("PipelineFactory", () => {
     });
 
     it("should use default options when none provided", async () => {
-      await PipelineFactory.createPipeline(mockDocService as DocumentManagementService);
+      await PipelineFactory.createPipeline(
+        mockDocService as DocumentManagementService,
+        mockEventBus,
+      );
 
-      expect(PipelineManager).toHaveBeenCalledWith(mockDocService, 3, {
+      // Should have called PipelineManager with store, eventBus, default concurrency (3), and default options
+      expect(PipelineManager).toHaveBeenCalledWith(mockDocService, mockEventBus, 3, {
         recoverJobs: false,
       });
     });
@@ -65,14 +75,24 @@ describe("PipelineFactory", () => {
         recoverJobs: true,
       };
 
-      await PipelineFactory.createPipeline(
-        mockDocService as DocumentManagementService,
+      const _pipeline = await PipelineFactory.createPipeline(
+        undefined,
+        mockEventBus,
         options,
       );
 
       // Should create client, ignoring local pipeline options
-      expect(PipelineClient).toHaveBeenCalledWith("http://external:9000");
+      expect(PipelineClient).toHaveBeenCalledWith("http://external:9000", mockEventBus);
       expect(PipelineManager).not.toHaveBeenCalled();
+    });
+
+    it("should throw error when serverUrl provided without eventBus", async () => {
+      const options = { serverUrl: "http://localhost:8080" };
+
+      await expect(
+        // @ts-expect-error - Testing error case where eventBus is missing
+        PipelineFactory.createPipeline(undefined, undefined, options),
+      ).rejects.toThrow("Remote pipeline requires EventBusService");
     });
   });
 });

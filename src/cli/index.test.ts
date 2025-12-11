@@ -5,15 +5,18 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCliProgram } from "./index";
-import {
-  resolveEmbeddingContext,
-  resolveProtocol,
-  validatePort,
-  validateResumeFlag,
-} from "./utils";
+import { resolveProtocol, validatePort, validateResumeFlag } from "./utils";
 
 // Mocks for execution tests will be defined below in dedicated describe block
-vi.mock("../utils/logger");
+
+// Mock CLI utils early to prevent side effects (like Playwright installation)
+vi.mock("./utils", async () => {
+  const actual = await vi.importActual<any>("./utils");
+  return {
+    ...actual,
+    ensurePlaywrightBrowsersInstalled: vi.fn(), // Mock to prevent side effects in tests
+  };
+});
 
 // --- Additional mocks for createPipelineWithCallbacks behavior tests ---
 vi.mock("../pipeline/PipelineFactory", () => ({
@@ -238,79 +241,13 @@ describe("CLI Command Arguments Matrix", () => {
       "web",
       "worker",
       "scrape",
+      "refresh",
       "search",
       "list",
       "find-version",
       "remove",
       "fetch-url",
     ]);
-  });
-});
-
-describe("createPipelineWithCallbacks behavior", () => {
-  afterEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("attaches callbacks for local pipeline and throws when docService missing", async () => {
-    const { createPipelineWithCallbacks } = await import("./utils");
-    const { PipelineFactory } = await import("../pipeline/PipelineFactory");
-    const mockSetCallbacks = vi.fn();
-
-    // Local path requires a DocumentManagementService instance
-    await expect(createPipelineWithCallbacks(undefined as any, {})).rejects.toThrow(
-      "Local pipeline requires a DocumentManagementService instance",
-    );
-
-    // Provide a fake docService and ensure callbacks are wired
-    vi.mocked(PipelineFactory.createPipeline).mockResolvedValueOnce({
-      setCallbacks: mockSetCallbacks,
-    } as any);
-
-    const fakeDocService = {} as any;
-    const pipeline = await createPipelineWithCallbacks(fakeDocService, {
-      concurrency: 2,
-    });
-
-    expect(PipelineFactory.createPipeline).toHaveBeenCalledWith(fakeDocService, {
-      concurrency: 2,
-    });
-    expect(mockSetCallbacks).toHaveBeenCalledWith(
-      expect.objectContaining({
-        onJobProgress: expect.any(Function),
-        onJobStatusChange: expect.any(Function),
-        onJobError: expect.any(Function),
-      }),
-    );
-    expect(pipeline).toBeDefined();
-  });
-
-  it("creates remote pipeline when serverUrl is provided and attaches callbacks", async () => {
-    const { createPipelineWithCallbacks } = await import("./utils");
-    const { PipelineFactory } = await import("../pipeline/PipelineFactory");
-    const mockSetCallbacks = vi.fn();
-
-    vi.mocked(PipelineFactory.createPipeline).mockResolvedValueOnce({
-      setCallbacks: mockSetCallbacks,
-    } as any);
-
-    const pipeline = await createPipelineWithCallbacks(undefined, {
-      serverUrl: "http://localhost:8080",
-      concurrency: 1,
-    });
-
-    expect(PipelineFactory.createPipeline).toHaveBeenCalledWith(undefined, {
-      serverUrl: "http://localhost:8080",
-      concurrency: 1,
-    });
-    expect(mockSetCallbacks).toHaveBeenCalledWith(
-      expect.objectContaining({
-        onJobProgress: expect.any(Function),
-        onJobStatusChange: expect.any(Function),
-        onJobError: expect.any(Function),
-      }),
-    );
-    expect(pipeline).toBeDefined();
   });
 });
 
@@ -330,6 +267,7 @@ describe("CLI command handler parameters", () => {
     ).resolves.not.toThrow();
 
     expect(capturedCreateArgs).toContainEqual({
+      eventBus: expect.any(Object),
       serverUrl,
       storePath: expect.any(String),
       embeddingConfig: undefined,
@@ -418,7 +356,10 @@ describe("Global option propagation", () => {
     // Verify that createLocalDocumentManagement was called with the resolved path
     expect(mockCreateLocalDocumentManagement).toHaveBeenCalledWith(
       resolvedStorePath,
-      expect.any(Object), // embeddingConfig
+      expect.objectContaining({
+        emitter: expect.any(Object),
+      }), // EventBusService instance
+      null, // embeddingConfig (null in this test)
     );
 
     // The parseAsync promise will hang since it starts a server, but we've verified our assertions
@@ -451,11 +392,70 @@ describe("Global option propagation", () => {
     // Verify that createLocalDocumentManagement was called with the resolved path
     expect(mockCreateLocalDocumentManagement).toHaveBeenCalledWith(
       resolvedStorePath,
-      expect.any(Object), // embeddingConfig
+      expect.objectContaining({
+        emitter: expect.any(Object),
+      }), // EventBusService instance
+      null, // embeddingConfig (null in this test)
     );
 
     // Clean up
     delete process.env.DOCS_MCP_STORE_PATH;
+  }, 10000);
+
+  it("should pass --embedding-model through to document management", async () => {
+    const embeddingModel = "openai:text-embedding-3-large";
+    const resolvedStorePath = "/mocked/resolved/path";
+    mockResolveStorePath.mockReturnValue(resolvedStorePath);
+
+    const { createCliProgram } = await import("./index");
+    const program = createCliProgram();
+
+    // Parse with embedding model flag
+    const _parsePromise = program.parseAsync([
+      "node",
+      "test",
+      "--embedding-model",
+      embeddingModel,
+      "--protocol",
+      "http",
+    ]);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(mockCreateLocalDocumentManagement).toHaveBeenCalledWith(
+      resolvedStorePath,
+      expect.any(Object),
+      expect.objectContaining({
+        provider: "openai",
+        model: "text-embedding-3-large",
+      }),
+    );
+  }, 10000);
+
+  it("should pick up DOCS_MCP_EMBEDDING_MODEL environment variable", async () => {
+    const envModel = "openai:text-embedding-ada-002";
+    const resolvedStorePath = "/mocked/resolved/path";
+    process.env.DOCS_MCP_EMBEDDING_MODEL = envModel;
+    mockResolveStorePath.mockReturnValue(resolvedStorePath);
+
+    const { createCliProgram } = await import("./index");
+    const program = createCliProgram();
+
+    // Run without explicit --embedding-model
+    const _parsePromise = program.parseAsync(["node", "test", "--protocol", "http"]);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(mockCreateLocalDocumentManagement).toHaveBeenCalledWith(
+      resolvedStorePath,
+      expect.any(Object),
+      expect.objectContaining({
+        provider: "openai",
+        model: "text-embedding-ada-002",
+      }),
+    );
+
+    delete process.env.DOCS_MCP_EMBEDDING_MODEL;
   }, 10000);
 });
 
@@ -530,53 +530,6 @@ describe("CLI Validation Logic", () => {
       expect(() => validateResumeFlag(true, "http://example.com")).toThrow(
         "--resume flag is incompatible with --server-url. External workers handle their own job recovery.",
       );
-    });
-  });
-
-  describe("resolveEmbeddingContext", () => {
-    afterEach(() => {
-      // Clean up environment after each test
-      delete process.env.DOCS_MCP_EMBEDDING_MODEL;
-      delete process.env.OPENAI_API_KEY;
-    });
-
-    it("should return null when no embedding model is configured and no OPENAI_API_KEY", () => {
-      // Ensure no env vars are set
-      delete process.env.DOCS_MCP_EMBEDDING_MODEL;
-      delete process.env.OPENAI_API_KEY;
-      const result = resolveEmbeddingContext();
-      expect(result).toBeNull();
-    });
-
-    it("should return default config when OPENAI_API_KEY is present but no embedding model specified", () => {
-      // Ensure no embedding model env var is set, but OPENAI_API_KEY is present
-      delete process.env.DOCS_MCP_EMBEDDING_MODEL;
-      process.env.OPENAI_API_KEY = "test-key";
-      const result = resolveEmbeddingContext();
-      expect(result).toMatchObject({
-        provider: "openai",
-        model: "text-embedding-3-small", // Default fallback
-      });
-    });
-
-    it("should return config when embedding model is configured via environment", () => {
-      process.env.DOCS_MCP_EMBEDDING_MODEL = "openai:text-embedding-ada-002";
-      // The function now checks for OPENAI_API_KEY when using OpenAI models
-      process.env.OPENAI_API_KEY = "test-key";
-      const result = resolveEmbeddingContext();
-      expect(result).toMatchObject({
-        provider: "openai",
-        model: "text-embedding-3-small",
-      });
-    });
-
-    it("should prioritize CLI args over environment variables", () => {
-      process.env.DOCS_MCP_EMBEDDING_MODEL = "openai:text-embedding-ada-002";
-      const result = resolveEmbeddingContext("openai:text-embedding-3-small");
-      expect(result).toMatchObject({
-        provider: "openai",
-        model: "text-embedding-3-small",
-      });
     });
   });
 });

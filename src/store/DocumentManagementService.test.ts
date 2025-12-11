@@ -1,18 +1,12 @@
 import path from "node:path";
-import { Document } from "@langchain/core/documents";
 import { createFsFromVolume, vol } from "memfs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  LibraryNotFoundInStoreError,
-  StoreError,
-  VersionNotFoundInStoreError,
-} from "./errors";
+import { LibraryNotFoundInStoreError, VersionNotFoundInStoreError } from "./errors";
 
 vi.mock("node:fs", () => ({
   default: createFsFromVolume(vol),
   existsSync: vi.fn(vol.existsSync),
 }));
-vi.mock("../utils/logger");
 vi.mock("../utils/paths", () => ({
   getProjectRoot: vi.fn(() => "/docs-mcp-server"),
 }));
@@ -38,7 +32,7 @@ const mockStore = {
   checkDocumentExists: vi.fn(),
   queryLibraryVersions: vi.fn().mockResolvedValue(new Map<string, any[]>()),
   addDocuments: vi.fn(),
-  deleteDocuments: vi.fn(),
+  deletePages: vi.fn(),
   // Status tracking methods
   updateVersionStatus: vi.fn(),
   updateVersionProgress: vi.fn(),
@@ -48,6 +42,9 @@ const mockStore = {
   getScraperOptions: vi.fn(),
   findVersionsBySourceUrl: vi.fn(),
   resolveVersionId: vi.fn(),
+  // Library management methods
+  getLibrary: vi.fn(),
+  deleteLibrary: vi.fn(),
 };
 
 // Mock the DocumentStore module
@@ -57,6 +54,7 @@ vi.mock("./DocumentStore", () => {
   return { DocumentStore: MockDocumentStore };
 });
 
+import { EventBusService } from "../events";
 import { getProjectRoot } from "../utils/paths";
 // Import the mocked constructor AFTER vi.mock
 import { DocumentManagementService } from "./DocumentManagementService";
@@ -111,12 +109,42 @@ describe("DocumentManagementService", () => {
 
     // Initialize the main service instance used by most tests
     // This will now use memfs for its internal fs calls
-    docService = new DocumentManagementService("/test/store/path");
+    const eventBus = new EventBusService();
+    docService = new DocumentManagementService("/test/store/path", eventBus);
   });
 
   afterEach(async () => {
     // Shutdown the main service instance
     await docService?.shutdown();
+  });
+
+  // --- getActiveEmbeddingConfig Tests ---
+  describe("getActiveEmbeddingConfig", () => {
+    it("should delegate to the underlying store", async () => {
+      const mockConfig = {
+        provider: "openai" as const,
+        model: "text-embedding-3-small",
+        dimensions: 1536,
+        modelSpec: "openai:text-embedding-3-small",
+      };
+      (mockStore as any).getActiveEmbeddingConfig = vi.fn().mockReturnValue(mockConfig);
+
+      await docService.initialize();
+      const config = docService.getActiveEmbeddingConfig();
+
+      expect((mockStore as any).getActiveEmbeddingConfig).toHaveBeenCalled();
+      expect(config).toEqual(mockConfig);
+    });
+
+    it("should return null when store returns null", async () => {
+      (mockStore as any).getActiveEmbeddingConfig = vi.fn().mockReturnValue(null);
+
+      await docService.initialize();
+      const config = docService.getActiveEmbeddingConfig();
+
+      expect((mockStore as any).getActiveEmbeddingConfig).toHaveBeenCalled();
+      expect(config).toBeNull();
+    });
   });
 
   // --- Pipeline Configuration Tests ---
@@ -134,25 +162,39 @@ describe("DocumentManagementService", () => {
         },
       };
 
-      const service = new DocumentManagementService("/test/path", null, pipelineConfig);
+      const eventBus = new EventBusService();
+      const service = new DocumentManagementService(
+        "/test/path",
+        eventBus,
+        null,
+        pipelineConfig,
+      );
       expect(service).toBeInstanceOf(DocumentManagementService);
       // Test passes if no errors are thrown during construction
     });
 
     it("should work without pipeline configuration", () => {
-      const service = new DocumentManagementService("/test/path");
+      const eventBus = new EventBusService();
+      const service = new DocumentManagementService("/test/path", eventBus);
       expect(service).toBeInstanceOf(DocumentManagementService);
       // Test passes if no errors are thrown during construction
     });
 
     it("should work with only embedding config provided", () => {
-      const service = new DocumentManagementService("/test/path", null);
+      const eventBus = new EventBusService();
+      const service = new DocumentManagementService("/test/path", eventBus, null);
       expect(service).toBeInstanceOf(DocumentManagementService);
     });
 
     it("should work with both embedding and pipeline config", () => {
       const pipelineConfig = { chunkSizes: { preferred: 500 } };
-      const service = new DocumentManagementService("/test/path", null, pipelineConfig);
+      const eventBus = new EventBusService();
+      const service = new DocumentManagementService(
+        "/test/path",
+        eventBus,
+        null,
+        pipelineConfig,
+      );
       expect(service).toBeInstanceOf(DocumentManagementService);
     });
   });
@@ -210,7 +252,8 @@ describe("DocumentManagementService", () => {
       const initSpy = vi.spyOn(DocumentManagementService.prototype, "initialize");
       const { createDocumentManagement } = await import("./index");
 
-      const dm = await createDocumentManagement({ storePath: "/test/path" });
+      const eventBus = new EventBusService();
+      const dm = await createDocumentManagement({ storePath: "/test/path", eventBus });
 
       expect(initSpy).toHaveBeenCalledTimes(1);
       expect(dm).toBeInstanceOf(DocumentManagementService);
@@ -222,7 +265,8 @@ describe("DocumentManagementService", () => {
       const { createDocumentManagement } = await import("./index");
       const url = "http://localhost:8080";
 
-      const dm = await createDocumentManagement({ serverUrl: url });
+      const eventBus = new EventBusService();
+      const dm = await createDocumentManagement({ serverUrl: url, eventBus });
 
       expect(MockDocumentManagementClient).toHaveBeenCalledWith(url);
       expect(mockClientInitialize).toHaveBeenCalledTimes(1);
@@ -234,7 +278,8 @@ describe("DocumentManagementService", () => {
       const initSpy = vi.spyOn(DocumentManagementService.prototype, "initialize");
       const { createLocalDocumentManagement } = await import("./index");
 
-      const dm = await createLocalDocumentManagement("/test/path");
+      const eventBus = new EventBusService();
+      const dm = await createLocalDocumentManagement("/test/path", eventBus);
 
       expect(initSpy).toHaveBeenCalledTimes(1);
       expect(dm).toBeInstanceOf(DocumentManagementService);
@@ -270,124 +315,22 @@ describe("DocumentManagementService", () => {
       expect(mockStore.checkDocumentExists).toHaveBeenCalledWith("test-lib", "1.0.0");
     });
 
-    describe("document processing", () => {
-      it("should add and search documents with basic metadata", async () => {
-        const library = "test-lib";
-        const version = "1.0.0";
-        const validDocument = new Document({
-          pageContent: "Test document content about testing",
-          metadata: {
-            url: "http://example.com",
-            title: "Test Doc",
-          },
-        });
-
-        const documentNoUrl = new Document({
-          pageContent: "Test document without URL",
-          metadata: {
-            title: "Test Doc",
-          },
-        });
-
-        // Should fail when URL is missing
-        await expect(
-          docService.addDocument(library, version, documentNoUrl),
-        ).rejects.toThrow(StoreError);
-
-        await expect(
-          docService.addDocument(library, version, documentNoUrl),
-        ).rejects.toHaveProperty("message", "Document metadata must include a valid URL");
-
-        // Should succeed with valid URL
-        mockRetriever.search.mockResolvedValue(["Mocked search result"]);
-
-        await docService.addDocument(library, version, validDocument);
-
-        const results = await docService.searchStore(library, version, "testing");
-        expect(mockStore.addDocuments).toHaveBeenCalledWith(
-          // Fix: Use mockStoreInstance
-          library,
-          version,
-          expect.arrayContaining([
-            expect.objectContaining({ pageContent: validDocument.pageContent }),
-          ]),
-        );
-        expect(results).toEqual(["Mocked search result"]); // Expect mocked result
-      });
-
-      it("should preserve semantic metadata when processing markdown documents", async () => {
-        const library = "test-lib";
-        const version = "1.0.0";
-        const document = new Document({
-          pageContent: "# Chapter 1\nTest content\n## Section 1.1\nMore testing content",
-          metadata: {
-            url: "http://example.com/docs",
-            title: "Root Doc",
-          },
-        });
-
-        // Mock the search result to match what would actually be stored after processing
-        mockRetriever.search.mockResolvedValue(["Mocked search result"]);
-
-        await docService.addDocument(library, version, document);
-
-        // Verify the documents were stored with semantic metadata
-        expect(mockStore.addDocuments).toHaveBeenCalledWith(
-          library,
-          version,
-          expect.arrayContaining([
-            expect.objectContaining({
-              metadata: expect.objectContaining({
-                level: 0,
-                path: [],
-              }),
-            }),
-          ]),
-        );
-
-        // Verify search results preserve metadata
-        const results = await docService.searchStore(library, version, "testing");
-        expect(results).toEqual(["Mocked search result"]);
-      });
-
-      it("should handle unsupported content types gracefully", async () => {
-        const library = "test-lib";
-        const version = "1.0.0";
-        const binaryDocument = new Document({
-          pageContent: "binary content with null bytes\0",
-          metadata: {
-            url: "http://example.com/image.png",
-            title: "Binary Image",
-            mimeType: "image/png",
-          },
-        });
-
-        // Should not throw an error, just log a warning and return early
-        await expect(
-          docService.addDocument(library, version, binaryDocument),
-        ).resolves.toBeUndefined();
-
-        // Verify that no documents were added to the store
-        expect(mockStore.addDocuments).not.toHaveBeenCalled();
-      });
-    });
-
     it("should remove all documents for a specific library and version", async () => {
       const library = "test-lib";
       const version = "1.0.0";
 
       await docService.removeAllDocuments(library, version);
-      expect(mockStore.deleteDocuments).toHaveBeenCalledWith(library, version); // Fix: Use mockStoreInstance
+      expect(mockStore.deletePages).toHaveBeenCalledWith(library, version); // Fix: Use mockStoreInstance
     });
 
     it("should handle removing documents with null/undefined/empty version", async () => {
       const library = "test-lib";
       await docService.removeAllDocuments(library, null);
-      expect(mockStore.deleteDocuments).toHaveBeenCalledWith(library, ""); // Fix: Use mockStoreInstance
+      expect(mockStore.deletePages).toHaveBeenCalledWith(library, ""); // Fix: Use mockStoreInstance
       await docService.removeAllDocuments(library, undefined);
-      expect(mockStore.deleteDocuments).toHaveBeenCalledWith(library, ""); // Fix: Use mockStoreInstance
+      expect(mockStore.deletePages).toHaveBeenCalledWith(library, ""); // Fix: Use mockStoreInstance
       await docService.removeAllDocuments(library, "");
-      expect(mockStore.deleteDocuments).toHaveBeenCalledWith(library, ""); // Fix: Use mockStoreInstance
+      expect(mockStore.deletePages).toHaveBeenCalledWith(library, ""); // Fix: Use mockStoreInstance
     });
 
     describe("listVersions", () => {
@@ -397,16 +340,16 @@ describe("DocumentManagementService", () => {
         expect(versions).toEqual([]);
       });
 
-      it("should return an array versions", async () => {
+      it("should return an array versions sorted descending (latest first)", async () => {
         const library = "test-lib";
         mockStore.queryUniqueVersions.mockResolvedValue(["1.0.0", "1.1.0", "1.2.0"]); // Fix: Use mockStoreInstance
 
         const versions = await docService.listVersions(library);
-        expect(versions).toEqual(["1.0.0", "1.1.0", "1.2.0"]);
+        expect(versions).toEqual(["1.2.0", "1.1.0", "1.0.0"]);
         expect(mockStore.queryUniqueVersions).toHaveBeenCalledWith(library); // Fix: Use mockStoreInstance
       });
 
-      it("should filter out empty string and non-semver versions", async () => {
+      it("should filter out empty string and non-semver versions, sorted descending", async () => {
         const library = "test-lib";
         mockStore.queryUniqueVersions.mockResolvedValue([
           // Fix: Use mockStoreInstance
@@ -418,7 +361,7 @@ describe("DocumentManagementService", () => {
         ]);
 
         const versions = await docService.listVersions(library);
-        expect(versions).toEqual(["1.0.0", "2.0.0-beta", "2.0.0"]);
+        expect(versions).toEqual(["2.0.0", "2.0.0-beta", "1.0.0"]);
         expect(mockStore.queryUniqueVersions).toHaveBeenCalledWith(library); // Fix: Use mockStoreInstance
       });
     });
@@ -768,46 +711,21 @@ describe("DocumentManagementService", () => {
     // Tests for handling optional version parameter (null/undefined/"")
     describe("Optional Version Handling", () => {
       const library = "opt-lib";
-      const doc = new Document({
-        pageContent: "Optional version test",
-        metadata: { url: "http://opt.com" },
-      });
       const query = "optional";
 
       it("exists should normalize version to empty string", async () => {
         await docService.exists(library, null);
-        expect(mockStore.checkDocumentExists).toHaveBeenCalledWith(library, ""); // Fix: Use mockStoreInstance
+        expect(mockStore.checkDocumentExists).toHaveBeenCalledWith(library, "");
         await docService.exists(library, undefined);
-        expect(mockStore.checkDocumentExists).toHaveBeenCalledWith(library, ""); // Fix: Use mockStoreInstance
+        expect(mockStore.checkDocumentExists).toHaveBeenCalledWith(library, "");
         await docService.exists(library, "");
-        expect(mockStore.checkDocumentExists).toHaveBeenCalledWith(library, ""); // Fix: Use mockStoreInstance
-      });
-
-      it("addDocument should normalize version to empty string", async () => {
-        await docService.addDocument(library, null, doc);
-        expect(mockStore.addDocuments).toHaveBeenCalledWith(
-          library,
-          "",
-          expect.any(Array),
-        ); // Fix: Use mockStoreInstance
-        await docService.addDocument(library, undefined, doc);
-        expect(mockStore.addDocuments).toHaveBeenCalledWith(
-          library,
-          "",
-          expect.any(Array),
-        ); // Fix: Use mockStoreInstance
-        await docService.addDocument(library, "", doc);
-        expect(mockStore.addDocuments).toHaveBeenCalledWith(
-          library,
-          "",
-          expect.any(Array),
-        ); // Fix: Use mockStoreInstance
+        expect(mockStore.checkDocumentExists).toHaveBeenCalledWith(library, "");
       });
 
       it("searchStore should normalize version to empty string", async () => {
         // Call without explicit limit, should use default limit of 5
         await docService.searchStore(library, null, query);
-        expect(mockRetriever.search).toHaveBeenCalledWith(library, "", query, 5); // Expect default limit 5
+        expect(mockRetriever.search).toHaveBeenCalledWith(library, "", query, 5);
 
         // Call with explicit limit
         await docService.searchStore(library, undefined, query, 7);
@@ -828,36 +746,23 @@ describe("DocumentManagementService", () => {
       ];
 
       it("should resolve successfully if versioned documents exist", async () => {
-        mockStore.queryUniqueVersions.mockResolvedValue(["1.0.0"]); // Has versioned docs // Fix: Use mockStoreInstance
-        mockStore.checkDocumentExists.mockResolvedValue(false); // No unversioned docs // Fix: Use mockStoreInstance
+        mockStore.getLibrary.mockResolvedValue({ id: 1, name: library.toLowerCase() });
 
         await expect(docService.validateLibraryExists(library)).resolves.toBeUndefined();
-        expect(mockStore.queryUniqueVersions).toHaveBeenCalledWith(library.toLowerCase()); // Fix: Use mockStoreInstance
-        expect(mockStore.checkDocumentExists).toHaveBeenCalledWith(
-          // Fix: Use mockStoreInstance
-          library.toLowerCase(),
-          "",
-        );
+        expect(mockStore.getLibrary).toHaveBeenCalledWith(library);
       });
 
       it("should resolve successfully if only unversioned documents exist", async () => {
-        mockStore.queryUniqueVersions.mockResolvedValue([]); // No versioned docs // Fix: Use mockStoreInstance
-        mockStore.checkDocumentExists.mockResolvedValue(true); // Has unversioned docs // Fix: Use mockStoreInstance
+        mockStore.getLibrary.mockResolvedValue({ id: 1, name: library.toLowerCase() });
 
         await expect(docService.validateLibraryExists(library)).resolves.toBeUndefined();
-        expect(mockStore.queryUniqueVersions).toHaveBeenCalledWith(library.toLowerCase()); // Fix: Use mockStoreInstance
-        expect(mockStore.checkDocumentExists).toHaveBeenCalledWith(
-          // Fix: Use mockStoreInstance
-          library.toLowerCase(),
-          "",
-        );
+        expect(mockStore.getLibrary).toHaveBeenCalledWith(library);
       });
 
       it("should throw LibraryNotFoundInStoreError if library does not exist (no suggestions)", async () => {
         const nonExistentLibrary = "non-existent-lib";
-        mockStore.queryUniqueVersions.mockResolvedValue([]); // Fix: Use mockStoreInstance
-        mockStore.checkDocumentExists.mockResolvedValue(false); // Fix: Use mockStoreInstance
-        mockStore.queryLibraryVersions.mockResolvedValue(new Map()); // No libraries exist at all // Fix: Use mockStoreInstance
+        mockStore.getLibrary.mockResolvedValue(null);
+        mockStore.queryLibraryVersions.mockResolvedValue(new Map());
 
         await expect(
           docService.validateLibraryExists(nonExistentLibrary),
@@ -869,14 +774,12 @@ describe("DocumentManagementService", () => {
         expect(error).toBeInstanceOf(LibraryNotFoundInStoreError);
         expect(error.library).toBe(nonExistentLibrary);
         expect(error.similarLibraries).toEqual([]);
-        expect(mockStore.queryLibraryVersions).toHaveBeenCalled(); // Ensure it tried to get suggestions // Fix: Use mockStoreInstance
+        expect(mockStore.queryLibraryVersions).toHaveBeenCalled();
       });
 
       it("should throw LibraryNotFoundInStoreError with suggestions if library does not exist", async () => {
-        const misspelledLibrary = "reac"; // Misspelled 'react'
-        mockStore.queryUniqueVersions.mockResolvedValue([]); // Fix: Use mockStoreInstance
-        mockStore.checkDocumentExists.mockResolvedValue(false); // Fix: Use mockStoreInstance
-        // Mock listLibraries to return existing libraries
+        const misspelledLibrary = "reac";
+        mockStore.getLibrary.mockResolvedValue(null);
         const mockLibraryMap = new Map<
           string,
           Array<{
@@ -907,31 +810,22 @@ describe("DocumentManagementService", () => {
           .catch((e) => e)) as LibraryNotFoundInStoreError;
         expect(error).toBeInstanceOf(LibraryNotFoundInStoreError);
         expect(error.library).toBe(misspelledLibrary);
-        expect(error.similarLibraries).toEqual(["react"]); // Expect 'react' as suggestion
-        expect(mockStore.queryLibraryVersions).toHaveBeenCalled(); // Fix: Use mockStoreInstance
+        expect(error.similarLibraries).toEqual(["react"]);
+        expect(mockStore.queryLibraryVersions).toHaveBeenCalled();
       });
 
       it("should handle case insensitivity", async () => {
         const libraryUpper = "TEST-LIB";
-        const libraryLower = libraryUpper.toLowerCase(); // 'test-lib'
+        mockStore.getLibrary.mockResolvedValue({
+          id: 1,
+          name: libraryUpper.toLowerCase(),
+        });
 
-        // Mock the store to indicate the LOWERCASE library exists
-        mockStore.queryUniqueVersions.mockImplementation(async (lib) =>
-          lib === libraryLower ? ["1.0.0"] : [],
-        );
-        // Alternatively, or additionally, mock checkDocumentExists:
-        // mockStore.checkDocumentExists.mockImplementation(async (lib, ver) =>
-        //   lib === libraryLower && ver === "" ? true : false
-        // );
-
-        // Should still resolve because the service normalizes the input
         await expect(
           docService.validateLibraryExists(libraryUpper),
         ).resolves.toBeUndefined();
 
-        // Verify the mocks were called with the LOWERCASE name
-        expect(mockStore.queryUniqueVersions).toHaveBeenCalledWith(libraryLower);
-        expect(mockStore.checkDocumentExists).toHaveBeenCalledWith(libraryLower, "");
+        expect(mockStore.getLibrary).toHaveBeenCalledWith(libraryUpper);
       });
     });
 
@@ -1194,7 +1088,8 @@ describe("DocumentManagementService", () => {
 
     describe("cleanup", () => {
       it("should shutdown without errors", async () => {
-        const service = new DocumentManagementService("/test/path", {
+        const eventBus = new EventBusService();
+        const service = new DocumentManagementService("/test/path", eventBus, {
           provider: "openai",
           model: "text-embedding-ada-002",
           dimensions: 1536,

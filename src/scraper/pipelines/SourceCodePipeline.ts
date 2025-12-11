@@ -1,13 +1,16 @@
 import { TreesitterSourceCodeSplitter } from "../../splitter/treesitter/TreesitterSourceCodeSplitter";
 import type { DocumentSplitter } from "../../splitter/types";
-import { SPLITTER_PREFERRED_CHUNK_SIZE } from "../../utils/config";
+import {
+  SPLITTER_MAX_CHUNK_SIZE,
+  SPLITTER_PREFERRED_CHUNK_SIZE,
+} from "../../utils/config";
 import { MimeTypeUtils } from "../../utils/mimeTypeUtils";
 import type { ContentFetcher, RawContent } from "../fetcher/types";
 import type { ContentProcessorMiddleware, MiddlewareContext } from "../middleware/types";
 import type { ScraperOptions } from "../types";
 import { convertToString } from "../utils/buffer";
 import { BasePipeline } from "./BasePipeline";
-import type { ProcessedContent } from "./types";
+import type { PipelineResult } from "./types";
 
 /**
  * Pipeline for processing source code content with semantic, structure-aware splitting.
@@ -19,36 +22,40 @@ export class SourceCodePipeline extends BasePipeline {
   private readonly middleware: ContentProcessorMiddleware[];
   private readonly splitter: DocumentSplitter;
 
-  constructor(chunkSize = SPLITTER_PREFERRED_CHUNK_SIZE) {
+  constructor(
+    _preferredChunkSize = SPLITTER_PREFERRED_CHUNK_SIZE,
+    maxChunkSize = SPLITTER_MAX_CHUNK_SIZE,
+  ) {
     super();
     // Source code processing uses minimal middleware since we preserve raw structure
     this.middleware = [];
 
     // Semantic, structure-preserving splitter only (no greedy size merging to keep hierarchy intact)
-    this.splitter = new TreesitterSourceCodeSplitter({ maxChunkSize: chunkSize });
+    this.splitter = new TreesitterSourceCodeSplitter({ maxChunkSize });
   }
 
-  canProcess(rawContent: RawContent): boolean {
-    if (!rawContent.mimeType) return false;
-    return MimeTypeUtils.isSourceCode(rawContent.mimeType);
+  canProcess(mimeType: string): boolean {
+    if (!mimeType) return false;
+    return MimeTypeUtils.isSourceCode(mimeType);
   }
 
   async process(
     rawContent: RawContent,
     options: ScraperOptions,
     fetcher?: ContentFetcher,
-  ): Promise<ProcessedContent> {
+  ): Promise<PipelineResult> {
     const contentString = convertToString(rawContent.content, rawContent.charset);
 
     const context: MiddlewareContext = {
+      contentType: rawContent.mimeType || "text/plain",
       content: contentString,
       source: rawContent.source,
-      metadata: {
-        language: rawContent.mimeType
-          ? MimeTypeUtils.extractLanguageFromMimeType(rawContent.mimeType)
-          : "text",
-        isSourceCode: true,
-      },
+      // metadata: {
+      //   language: rawContent.mimeType
+      //     ? MimeTypeUtils.extractLanguageFromMimeType(rawContent.mimeType)
+      //     : "text",
+      //   isSourceCode: true,
+      // },
       links: [], // Source code files typically don't contain web links
       errors: [],
       options,
@@ -62,8 +69,10 @@ export class SourceCodePipeline extends BasePipeline {
     const chunks = await this.splitter.splitText(context.content, rawContent.mimeType);
 
     return {
+      title: context.title,
+      contentType: context.contentType,
       textContent: context.content,
-      metadata: context.metadata,
+      // metadata: context.metadata,
       links: context.links,
       errors: context.errors,
       chunks,

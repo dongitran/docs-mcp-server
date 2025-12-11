@@ -68,14 +68,14 @@ Run a standalone server that includes both MCP endpoints and web interface in a 
 
 ### Option 2: npx
 
-1. **Install Node.js 22.x or later.**
+1. **Install Node.js 20.x or later.**
 2. **Start the server:**
 
    ```bash
    npx urbox-docs-mcp-server@latest
    ```
 
-   This will run the server on port 6280 by default.
+   This runs the server on port 6280 by default.
 
    **Optional:** Prefix with `OPENAI_API_KEY="your-openai-api-key"` to enable vector search for improved results.
 
@@ -130,9 +130,9 @@ npx urbox-docs-mcp-server@latest scrape react https://react.dev/reference/react 
 ### Adding Library Documentation
 
 1. Open the Web Interface at `http://localhost:6280`.
-2. Use the "Queue New Scrape Job" form.
+2. Use the "Add New Documentation" form.
 3. Enter the documentation URL, library name, and (optionally) version.
-4. Click "Queue Job". Monitor progress in the Job Queue.
+4. Click "Start Indexing". Monitor progress in the Job Queue.
 5. Repeat for each library you want indexed.
 
 Once a job completes, the docs are searchable via your AI assistant or the Web UI.
@@ -459,7 +459,7 @@ npx urbox-docs-mcp-server@latest
 
 For more architectural details, see the [ARCHITECTURE.md](ARCHITECTURE.md).
 
-For enterprise authentication and security features, see the [Authentication Guide](docs/authentication.md).
+For enterprise authentication and security features, see the [Authentication Guide](docs/infrastructure/authentication.md).
 
 ## Telemetry
 
@@ -508,7 +508,7 @@ docker run \
   ghcr.io/dongtran0ai/docs-mcp-server:latest
 ```
 
-For more details about our telemetry practices, see the [Telemetry Guide](docs/telemetry.md).
+For more details about our telemetry practices, see the [Telemetry Guide](docs/infrastructure/telemetry.md).
 
 ## Development
 

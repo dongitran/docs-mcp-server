@@ -8,8 +8,10 @@
  */
 
 import { v4 as uuidv4 } from "uuid";
+import type { EventBusService } from "../events/EventBusService";
+import { EventType } from "../events/types";
 import { ScraperRegistry, ScraperService } from "../scraper";
-import type { ScraperOptions, ScraperProgress } from "../scraper/types";
+import type { ScraperOptions, ScraperProgressEvent } from "../scraper/types";
 import type { DocumentManagementService } from "../store";
 import { VersionStatus } from "../store/types";
 import { DEFAULT_MAX_CONCURRENCY } from "../utils/config";
@@ -17,7 +19,7 @@ import { logger } from "../utils/logger";
 import { CancellationError, PipelineStateError } from "./errors";
 import { PipelineWorker } from "./PipelineWorker"; // Import the worker
 import type { IPipeline } from "./trpc/interfaces";
-import type { InternalPipelineJob, PipelineJob, PipelineManagerCallbacks } from "./types";
+import type { InternalPipelineJob, PipelineJob } from "./types";
 import { PipelineJobStatus } from "./types";
 
 /**
@@ -29,51 +31,32 @@ export class PipelineManager implements IPipeline {
   private activeWorkers: Set<string> = new Set();
   private isRunning = false;
   private concurrency: number;
-  private callbacks: PipelineManagerCallbacks = {};
-  private composedCallbacks: PipelineManagerCallbacks = {};
   private store: DocumentManagementService;
   private scraperService: ScraperService;
   private shouldRecoverJobs: boolean;
+  private eventBus: EventBusService;
 
   constructor(
     store: DocumentManagementService,
+    eventBus: EventBusService,
     concurrency: number = DEFAULT_MAX_CONCURRENCY,
     options: { recoverJobs?: boolean } = {},
   ) {
     this.store = store;
+    this.eventBus = eventBus;
     this.concurrency = concurrency;
     this.shouldRecoverJobs = options.recoverJobs ?? true; // Default to true for backward compatibility
     // ScraperService needs a registry. We create one internally for the manager.
     const registry = new ScraperRegistry();
     this.scraperService = new ScraperService(registry);
-
-    // Initialize composed callbacks to ensure progress persistence even before setCallbacks is called
-    this.rebuildComposedCallbacks();
   }
 
   /**
-   * Registers callback handlers for pipeline manager events.
+   * No-op method for backward compatibility with IPipeline interface.
+   * Events are now emitted directly to EventBusService.
    */
-  setCallbacks(callbacks: PipelineManagerCallbacks): void {
-    this.callbacks = callbacks || {};
-    this.rebuildComposedCallbacks();
-  }
-
-  /** Build composed callbacks that ensure persistence then delegate to user callbacks */
-  private rebuildComposedCallbacks(): void {
-    const user = this.callbacks;
-    this.composedCallbacks = {
-      onJobProgress: async (job, progress) => {
-        await this.updateJobProgress(job, progress);
-        await user.onJobProgress?.(job, progress);
-      },
-      onJobStatusChange: async (job) => {
-        await user.onJobStatusChange?.(job);
-      },
-      onJobError: async (job, error, document) => {
-        await user.onJobError?.(job, error, document);
-      },
-    };
+  setCallbacks(_callbacks: unknown): void {
+    // No-op: callbacks are no longer used
   }
 
   /**
@@ -140,7 +123,7 @@ export class PipelineManager implements IPipeline {
       for (const version of runningVersions) {
         await this.store.updateVersionStatus(version.id, VersionStatus.QUEUED);
         logger.info(
-          `🔄 Reset interrupted job to QUEUED: ${version.library_name}@${version.name || "unversioned"}`,
+          `🔄 Reset interrupted job to QUEUED: ${version.library_name}@${version.name || "latest"}`,
         );
       }
 
@@ -167,7 +150,7 @@ export class PipelineManager implements IPipeline {
             parsedScraperOptions = JSON.parse(version.scraper_options);
           } catch (error) {
             logger.warn(
-              `⚠️ Failed to parse scraper options for ${version.library_name}@${version.name || "unversioned"}: ${error}`,
+              `⚠️  Failed to parse scraper options for ${version.library_name}@${version.name || "latest"}: ${error}`,
             );
           }
         }
@@ -235,22 +218,13 @@ export class PipelineManager implements IPipeline {
   /**
    * Enqueues a new document processing job, aborting any existing QUEUED/RUNNING job for the same library+version (including unversioned).
    */
-  async enqueueJob(
+  async enqueueScrapeJob(
     library: string,
     version: string | undefined | null,
     options: ScraperOptions,
   ): Promise<string> {
     // Normalize version: treat undefined/null as "" (unversioned)
     const normalizedVersion = version ?? "";
-
-    // Extract URL and convert ScraperOptions to VersionScraperOptions
-    const {
-      url,
-      library: _library,
-      version: _version,
-      signal: _signal,
-      ...versionOptions
-    } = options;
 
     // Abort any existing QUEUED or RUNNING job for the same library+version
     const allJobs = await this.getJobs();
@@ -299,14 +273,14 @@ export class PipelineManager implements IPipeline {
       progressMaxPages: 0,
       errorMessage: null,
       updatedAt: new Date(),
-      sourceUrl: url,
-      scraperOptions: versionOptions,
+      sourceUrl: options.url,
+      scraperOptions: options,
     };
 
     this.jobMap.set(jobId, job);
     this.jobQueue.push(jobId);
     logger.info(
-      `📝 Job enqueued: ${jobId} for ${library}${normalizedVersion ? `@${normalizedVersion}` : " (unversioned)"}`,
+      `📝 Job enqueued: ${jobId} for ${library}${normalizedVersion ? `@${normalizedVersion}` : " (latest)"}`,
     );
 
     // Update database status to QUEUED
@@ -320,6 +294,101 @@ export class PipelineManager implements IPipeline {
     }
 
     return jobId;
+  }
+
+  /**
+   * Enqueues a refresh job for an existing library version by re-scraping all pages
+   * and using ETag comparison to skip unchanged content.
+   *
+   * If the version was never completed (interrupted or failed scrape), performs a
+   * full re-scrape from scratch instead of a refresh to ensure completeness.
+   */
+  async enqueueRefreshJob(
+    library: string,
+    version: string | undefined | null,
+  ): Promise<string> {
+    // Normalize version: treat undefined/null as "" (unversioned)
+    const normalizedVersion = version ?? "";
+
+    try {
+      // First, check if the library version exists
+      const versionId = await this.store.ensureVersion({
+        library,
+        version: normalizedVersion,
+      });
+
+      // Check the version's status to detect incomplete scrapes
+      const versionInfo = await this.store.getVersionById(versionId);
+      if (!versionInfo) {
+        throw new Error(`Version ID ${versionId} not found`);
+      }
+
+      // Get library information
+      const libraryInfo = await this.store.getLibraryById(versionInfo.library_id);
+      if (!libraryInfo) {
+        throw new Error(`Library ID ${versionInfo.library_id} not found`);
+      }
+
+      // If the version is not completed, it means the previous scrape was interrupted
+      // or failed. In this case, perform a full re-scrape instead of a refresh.
+      if (versionInfo && versionInfo.status !== VersionStatus.COMPLETED) {
+        logger.info(
+          `⚠️  Version ${library}@${normalizedVersion || "latest"} has status "${versionInfo.status}". Performing full re-scrape instead of refresh.`,
+        );
+        return this.enqueueJobWithStoredOptions(library, normalizedVersion);
+      }
+
+      // Get all pages for this version with their ETags and depths
+      const pages = await this.store.getPagesByVersionId(versionId);
+
+      // Debug: Log first page to see what data we're getting
+      if (pages.length > 0) {
+        logger.debug(
+          `Sample page data: url=${pages[0].url}, etag=${pages[0].etag}, depth=${pages[0].depth}`,
+        );
+      }
+
+      if (pages.length === 0) {
+        throw new Error(
+          `No pages found for ${library}@${normalizedVersion || "latest"}. Use scrape_docs to index it first.`,
+        );
+      }
+
+      logger.info(
+        `🔄 Preparing refresh job for ${library}@${normalizedVersion || "latest"} with ${pages.length} page(s)`,
+      );
+
+      // Build initialQueue from pages with original depth values
+      const initialQueue = pages.map((page) => ({
+        url: page.url,
+        depth: page.depth ?? 0, // Use original depth, fallback to 0 for old data
+        pageId: page.id,
+        etag: page.etag,
+      }));
+
+      // Get stored scraper options to retrieve the source URL and other options
+      const storedOptions = await this.store.getScraperOptions(versionId);
+
+      // Build scraper options with initialQueue and isRefresh flag
+      const scraperOptions = {
+        url: storedOptions?.sourceUrl || pages[0].url, // Required but not used when initialQueue is set
+        library,
+        version: normalizedVersion,
+        ...(storedOptions?.options || {}), // Include stored options if available (spread first)
+        // Override with refresh-specific options (these must come after the spread)
+        initialQueue, // Pre-populated queue with existing pages
+        isRefresh: true, // Mark this as a refresh operation
+      };
+
+      // Enqueue as a standard scrape job with the initialQueue
+      logger.info(
+        `📝 Enqueueing refresh job for ${library}@${normalizedVersion || "latest"}`,
+      );
+      return this.enqueueScrapeJob(library, normalizedVersion, scraperOptions);
+    } catch (error) {
+      logger.error(`❌ Failed to enqueue refresh job: ${error}`);
+      throw error;
+    }
   }
 
   /**
@@ -342,7 +411,7 @@ export class PipelineManager implements IPipeline {
 
       if (!stored) {
         throw new Error(
-          `No stored scraper options found for ${library}@${normalizedVersion || "unversioned"}`,
+          `No stored scraper options found for ${library}@${normalizedVersion || "latest"}`,
         );
       }
 
@@ -357,10 +426,10 @@ export class PipelineManager implements IPipeline {
       };
 
       logger.info(
-        `🔄 Re-indexing ${library}@${normalizedVersion || "unversioned"} with stored options from ${stored.sourceUrl}`,
+        `🔄 Re-indexing ${library}@${normalizedVersion || "latest"} with stored options from ${stored.sourceUrl}`,
       );
 
-      return this.enqueueJob(library, normalizedVersion, completeOptions);
+      return this.enqueueScrapeJob(library, normalizedVersion, completeOptions);
     } catch (error) {
       logger.error(`❌ Failed to enqueue job with stored options: ${error}`);
       throw error;
@@ -484,6 +553,8 @@ export class PipelineManager implements IPipeline {
 
     if (clearedCount > 0) {
       logger.info(`🧹 Cleared ${clearedCount} completed job(s) from the queue`);
+      // Emit event to notify clients that the job list has changed
+      this.eventBus.emit(EventType.JOB_LIST_CHANGE, undefined);
     } else {
       logger.debug("No completed jobs to clear");
     }
@@ -548,8 +619,19 @@ export class PipelineManager implements IPipeline {
     const worker = new PipelineWorker(this.store, this.scraperService);
 
     try {
-      // Delegate the actual work to the worker using composed callbacks
-      await worker.executeJob(job, this.composedCallbacks);
+      // Delegate the actual work to the worker
+      // The worker works with InternalPipelineJob, we convert to public when needed
+      await worker.executeJob(job, {
+        onJobProgress: async (internalJob, progress) => {
+          await this.updateJobProgress(internalJob, progress);
+        },
+        onJobError: async (internalJob, error, document) => {
+          // Log job errors
+          logger.warn(
+            `⚠️  Job ${internalJob.id} error ${document ? `on document ${document.url}` : ""}: ${error.message}`,
+          );
+        },
+      });
 
       // If executeJob completes without throwing, and we weren't cancelled meanwhile...
       if (signal.aborted) {
@@ -649,21 +731,15 @@ export class PipelineManager implements IPipeline {
       // Store scraper options when job is first queued
       if (newStatus === PipelineJobStatus.QUEUED && job.scraperOptions) {
         try {
-          // Reconstruct ScraperOptions for storage (DocumentStore will filter runtime fields)
-          const fullOptions = {
-            url: job.sourceUrl ?? "",
-            library: job.library,
-            version: job.version,
-            ...job.scraperOptions,
-          };
-          await this.store.storeScraperOptions(versionId, fullOptions);
+          // Pass the complete scraper options (DocumentStore will filter runtime fields)
+          await this.store.storeScraperOptions(versionId, job.scraperOptions);
           logger.debug(
             `Stored scraper options for ${job.library}@${job.version}: ${job.sourceUrl}`,
           );
         } catch (optionsError) {
           // Log warning but don't fail the job - options storage is not critical
           logger.warn(
-            `⚠️ Failed to store scraper options for job ${job.id}: ${optionsError}`,
+            `⚠️  Failed to store scraper options for job ${job.id}: ${optionsError}`,
           );
         }
       }
@@ -672,16 +748,23 @@ export class PipelineManager implements IPipeline {
       // Don't throw - we don't want to break the pipeline for database issues
     }
 
-    // Fire callback
-    await this.callbacks.onJobStatusChange?.(job);
+    // Emit events to EventBusService
+    const publicJob = this.toPublicJob(job);
+
+    this.eventBus.emit(EventType.JOB_STATUS_CHANGE, publicJob);
+    this.eventBus.emit(EventType.LIBRARY_CHANGE, undefined);
+
+    // Logging
+    logger.debug(`Job ${job.id} status changed to: ${job.status}`);
   }
 
   /**
    * Updates both in-memory job progress and database progress (write-through).
+   * Also emits progress events to the EventBusService.
    */
   async updateJobProgress(
     job: InternalPipelineJob,
-    progress: ScraperProgress,
+    progress: ScraperProgressEvent,
   ): Promise<void> {
     // Update in-memory progress
     job.progress = progress;
@@ -703,7 +786,14 @@ export class PipelineManager implements IPipeline {
       }
     }
 
-    // Note: Do not invoke onJobProgress callback here.
-    // Callbacks are wired by services (e.g., workerService/CLI) and already call this method.
+    // Emit progress event to EventBusService
+    const publicJob = this.toPublicJob(job);
+
+    this.eventBus.emit(EventType.JOB_PROGRESS, { job: publicJob, progress });
+
+    // Logging
+    logger.debug(
+      `Job ${job.id} progress: ${progress.pagesScraped}/${progress.totalPages} pages`,
+    );
   }
 }

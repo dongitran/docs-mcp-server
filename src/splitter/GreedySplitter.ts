@@ -1,4 +1,5 @@
-import type { ContentChunk, DocumentSplitter, SectionContentType } from "./types";
+import { logger } from "../utils";
+import type { Chunk, DocumentSplitter, SectionContentType } from "./types";
 
 /**
  * Takes small document chunks and greedily concatenates them into larger, more meaningful units
@@ -14,6 +15,7 @@ export class GreedySplitter implements DocumentSplitter {
   private baseSplitter: DocumentSplitter;
   private minChunkSize: number;
   private preferredChunkSize: number;
+  private maxChunkSize: number;
 
   /**
    * Combines a base document splitter with size constraints to produce optimally-sized chunks.
@@ -24,10 +26,12 @@ export class GreedySplitter implements DocumentSplitter {
     baseSplitter: DocumentSplitter,
     minChunkSize: number,
     preferredChunkSize: number,
+    maxChunkSize: number,
   ) {
     this.baseSplitter = baseSplitter;
     this.minChunkSize = minChunkSize;
     this.preferredChunkSize = preferredChunkSize;
+    this.maxChunkSize = maxChunkSize;
   }
 
   /**
@@ -36,26 +40,55 @@ export class GreedySplitter implements DocumentSplitter {
    * section boundaries to maintain document structure. This balances the need for
    * context with semantic coherence.
    */
-  async splitText(markdown: string, contentType?: string): Promise<ContentChunk[]> {
+  async splitText(markdown: string, contentType?: string): Promise<Chunk[]> {
     const initialChunks = await this.baseSplitter.splitText(markdown, contentType);
-    const concatenatedChunks: ContentChunk[] = [];
-    let currentChunk: ContentChunk | null = null;
+    const concatenatedChunks: Chunk[] = [];
+    let currentChunk: Chunk | null = null;
 
     for (const nextChunk of initialChunks) {
+      // Warn if a chunk from the base splitter already exceeds max size
+      if (nextChunk.content.length > this.maxChunkSize) {
+        logger.warn(
+          `⚠ Chunk from base splitter exceeds max size: ${nextChunk.content.length} > ${this.maxChunkSize}`,
+        );
+      }
+
       if (currentChunk) {
-        if (this.wouldExceedMaxSize(currentChunk, nextChunk)) {
+        const combinedSize = currentChunk.content.length + nextChunk.content.length;
+
+        // HARD LIMIT: Never exceed max chunk size
+        if (combinedSize > this.maxChunkSize) {
           concatenatedChunks.push(currentChunk);
           currentChunk = this.cloneChunk(nextChunk);
           continue;
         }
+
+        // STRUCTURE > SIZE: Respect major section boundaries (H1/H2) when current chunk
+        // is large enough. This prevents headings from being merged with unrelated preceding
+        // content while still allowing tiny chunks to be merged to avoid orphans.
         if (
           currentChunk.content.length >= this.minChunkSize &&
-          this.startsNewMajorSection(nextChunk)
+          this.startsNewMajorSection(nextChunk) &&
+          !this.isSameSection(currentChunk, nextChunk)
         ) {
           concatenatedChunks.push(currentChunk);
           currentChunk = this.cloneChunk(nextChunk);
           continue;
         }
+
+        // If combining would exceed preferred size AND we're already at min size, split
+        // UNLESS the next chunk is very small (< min size), in which case merge it anyway
+        if (
+          combinedSize > this.preferredChunkSize &&
+          currentChunk.content.length >= this.minChunkSize &&
+          nextChunk.content.length >= this.minChunkSize
+        ) {
+          concatenatedChunks.push(currentChunk);
+          currentChunk = this.cloneChunk(nextChunk);
+          continue;
+        }
+
+        // Merge the chunks
         currentChunk.content += `${currentChunk.content.endsWith("\n") ? "" : "\n"}${nextChunk.content}`;
         currentChunk.section = this.mergeSectionInfo(currentChunk, nextChunk);
         currentChunk.types = this.mergeTypes(currentChunk.types, nextChunk.types);
@@ -71,7 +104,7 @@ export class GreedySplitter implements DocumentSplitter {
     return concatenatedChunks;
   }
 
-  private cloneChunk(chunk: ContentChunk): ContentChunk {
+  private cloneChunk(chunk: Chunk): Chunk {
     return {
       types: [...chunk.types],
       content: chunk.content,
@@ -86,24 +119,25 @@ export class GreedySplitter implements DocumentSplitter {
    * H1 and H2 headings represent major conceptual breaks in the document.
    * Preserving these splits helps maintain the document's logical structure.
    */
-  private startsNewMajorSection(chunk: ContentChunk): boolean {
+  private startsNewMajorSection(chunk: Chunk): boolean {
     return chunk.section.level === 1 || chunk.section.level === 2;
   }
 
   /**
-   * Size limit check to ensure chunks remain within embedding model constraints.
-   * Essential for maintaining consistent embedding quality and avoiding truncation.
+   * Checks if two chunks belong to the same section by comparing their paths.
+   * Returns true if the paths are identical or if one is a parent of the other.
    */
-  private wouldExceedMaxSize(
-    currentChunk: ContentChunk | null,
-    nextChunk: ContentChunk,
-  ): boolean {
-    if (!currentChunk) {
-      return false;
+  private isSameSection(chunk1: Chunk, chunk2: Chunk): boolean {
+    const path1 = chunk1.section.path;
+    const path2 = chunk2.section.path;
+
+    // Exact match
+    if (path1.length === path2.length && path1.every((part, i) => part === path2[i])) {
+      return true;
     }
-    return (
-      currentChunk.content.length + nextChunk.content.length > this.preferredChunkSize
-    );
+
+    // Parent-child relationship (one path includes the other)
+    return this.isPathIncluded(path1, path2) || this.isPathIncluded(path2, path1);
   }
 
   /**
@@ -122,10 +156,7 @@ export class GreedySplitter implements DocumentSplitter {
    *    - For siblings/unrelated sections, uses the common parent path
    *    - If no common path exists, uses the root path ([])
    */
-  private mergeSectionInfo(
-    currentChunk: ContentChunk,
-    nextChunk: ContentChunk,
-  ): ContentChunk["section"] {
+  private mergeSectionInfo(currentChunk: Chunk, nextChunk: Chunk): Chunk["section"] {
     // Always use the lowest level
     const level = Math.min(currentChunk.section.level, nextChunk.section.level);
 

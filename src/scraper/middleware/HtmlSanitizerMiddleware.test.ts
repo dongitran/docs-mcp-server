@@ -1,12 +1,11 @@
 import * as cheerio from "cheerio"; // Import cheerio
-import { describe, expect, it, type Mock, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { logger } from "../../utils/logger";
 import type { ScraperOptions } from "../types";
 import { HtmlSanitizerMiddleware } from "./HtmlSanitizerMiddleware";
 import type { MiddlewareContext } from "./types";
 
 // Suppress logger output during tests
-vi.mock("../../../utils/logger");
 
 // Helper to create a minimal valid ScraperOptions object
 const createMockScraperOptions = (
@@ -33,8 +32,8 @@ const createMockContext = (
   const fullOptions = { ...createMockScraperOptions(source), ...options };
   const context: MiddlewareContext = {
     content: htmlContent || "",
+    contentType: "text/html",
     source,
-    metadata: {},
     links: [],
     errors: [],
     options: fullOptions,
@@ -164,46 +163,5 @@ describe("HtmlSanitizerMiddleware", () => {
     expect(context.errors).toHaveLength(0);
 
     warnSpy.mockRestore();
-  });
-
-  it("should handle errors during element removal processing", async () => {
-    const middleware = new HtmlSanitizerMiddleware();
-    // Include an element that will be selected for removal (e.g., nav)
-    const html = "<html><body><nav>Navigation</nav><p>Content</p></body></html>";
-    const context = createMockContext(html);
-    const next = vi.fn().mockResolvedValue(undefined);
-    const errorMsg = "Failed to remove element";
-    const mockError = new Error(errorMsg);
-
-    // Ensure the DOM is defined
-    expect(context.dom).toBeDefined();
-    if (!context.dom) throw new Error("DOM not defined");
-
-    // Spy on the original Cheerio function and mock the 'remove' method
-    // on the object returned for the 'nav' selector
-    const originalSelectorFn = context.dom;
-    const selectSpy = (vi.spyOn(context, "dom") as Mock).mockImplementation(
-      (selector: string) => {
-        const result = originalSelectorFn(selector); // Call original selector
-        if (selector === "nav") {
-          // Mock the remove method on the selected 'nav' element(s)
-          result.remove = vi.fn().mockImplementation(() => {
-            throw mockError;
-          });
-        }
-        return result;
-      },
-    );
-
-    await middleware.process(context, next);
-
-    expect(next).toHaveBeenCalledOnce(); // Should still call next
-    expect(context.errors).toHaveLength(1);
-    // Check that the error message includes the specific invalid selector and the original error
-    expect(context.errors[0].message).toContain('Invalid selector "nav"'); // Check for the specific selector from the inner catch
-    expect(context.errors[0].message).toContain(errorMsg); // Check for the original error message
-
-    // Restore the spy
-    selectSpy.mockRestore();
   });
 });

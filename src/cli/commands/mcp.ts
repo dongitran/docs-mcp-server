@@ -7,16 +7,16 @@ import { Option } from "commander";
 import { startAppServer } from "../../app";
 import { startStdioServer } from "../../mcp/startStdioServer";
 import { initializeTools } from "../../mcp/tools";
-import type { PipelineOptions } from "../../pipeline";
-import { createDocumentManagement } from "../../store";
+import { PipelineFactory, type PipelineOptions } from "../../pipeline";
+import { createDocumentManagement, type DocumentManagementService } from "../../store";
 import type { IDocumentManagement } from "../../store/trpc/interfaces";
-import { analytics, TelemetryEvent } from "../../telemetry";
+import { TelemetryEvent, telemetry } from "../../telemetry";
 import { DEFAULT_HOST, DEFAULT_HTTP_PORT, DEFAULT_PROTOCOL } from "../../utils/config";
 import { LogLevel, logger, setLogLevel } from "../../utils/logger";
 import { registerGlobalServices } from "../main";
 import {
   createAppServerConfig,
-  createPipelineWithCallbacks,
+  getEventBus,
   parseAuthConfig,
   resolveEmbeddingContext,
   resolveProtocol,
@@ -64,7 +64,7 @@ export function createMcpCommand(program: Command): Command {
       )
       .option(
         "--server-url <url>",
-        "URL of external pipeline worker RPC (e.g., http://localhost:6280/api)",
+        "URL of external pipeline worker RPC (e.g., http://localhost:8080/api)",
       )
       .option(
         "--read-only",
@@ -102,18 +102,21 @@ export function createMcpCommand(program: Command): Command {
         ).env("DOCS_MCP_AUTH_AUDIENCE"),
       )
       .action(
-        async (cmdOptions: {
-          protocol: string;
-          port: string;
-          host: string;
-          embeddingModel?: string;
-          serverUrl?: string;
-          readOnly: boolean;
-          authEnabled?: boolean;
-          authIssuerUrl?: string;
-          authAudience?: string;
-        }) => {
-          await analytics.track(TelemetryEvent.CLI_COMMAND, {
+        async (
+          cmdOptions: {
+            protocol: string;
+            port: string;
+            host: string;
+            embeddingModel?: string;
+            serverUrl?: string;
+            readOnly: boolean;
+            authEnabled?: boolean;
+            authIssuerUrl?: string;
+            authAudience?: string;
+          },
+          command?: Command,
+        ) => {
+          await telemetry.track(TelemetryEvent.CLI_COMMAND, {
             command: "mcp",
             protocol: cmdOptions.protocol,
             port: cmdOptions.port,
@@ -156,25 +159,33 @@ export function createMcpCommand(program: Command): Command {
               process.exit(1);
             }
 
+            const eventBus = getEventBus(command);
+
             const docService: IDocumentManagement = await createDocumentManagement({
               serverUrl,
               embeddingConfig,
               storePath: globalOptions.storePath,
+              eventBus,
             });
             const pipelineOptions: PipelineOptions = {
               recoverJobs: false, // MCP command doesn't support job recovery
               serverUrl,
               concurrency: 3,
             };
-            const pipeline = await createPipelineWithCallbacks(
-              serverUrl ? undefined : (docService as unknown as never),
-              pipelineOptions,
-            );
+            const pipeline = serverUrl
+              ? await PipelineFactory.createPipeline(undefined, eventBus, {
+                  serverUrl,
+                  ...pipelineOptions,
+                })
+              : await PipelineFactory.createPipeline(
+                  docService as DocumentManagementService,
+                  eventBus,
+                  pipelineOptions,
+                );
 
             if (resolvedProtocol === "stdio") {
               // Direct stdio mode - bypass AppServer entirely
               logger.debug(`Auto-detected stdio protocol (no TTY)`);
-              logger.info("🚀 Starting MCP server (stdio mode)");
 
               await pipeline.start(); // Start pipeline for stdio mode
               const mcpTools = await initializeTools(docService, pipeline);
@@ -191,7 +202,6 @@ export function createMcpCommand(program: Command): Command {
             } else {
               // HTTP mode - use AppServer
               logger.debug(`Auto-detected http protocol (TTY available)`);
-              logger.info("🚀 Starting MCP server (http mode)");
 
               // Configure MCP-only server
               const config = createAppServerConfig({
@@ -210,7 +220,12 @@ export function createMcpCommand(program: Command): Command {
                 },
               });
 
-              const appServer = await startAppServer(docService, pipeline, config);
+              const appServer = await startAppServer(
+                docService,
+                pipeline,
+                eventBus,
+                config,
+              );
 
               // Register for graceful shutdown (http mode)
               // Note: pipeline is managed by AppServer, so don't register it globally

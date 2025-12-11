@@ -1,19 +1,18 @@
-import type { Document } from "@langchain/core/documents";
 import type { Embeddings } from "@langchain/core/embeddings";
 import Database, { type Database as DatabaseType } from "better-sqlite3";
-import semver from "semver";
 import * as sqliteVec from "sqlite-vec";
-import type { ScraperOptions } from "../scraper/types";
-import type { DocumentMetadata } from "../types";
+import type { ScrapeResult, ScraperOptions } from "../scraper/types";
 import {
   EMBEDDING_BATCH_CHARS,
   EMBEDDING_BATCH_SIZE,
   SEARCH_OVERFETCH_FACTOR,
   SEARCH_WEIGHT_FTS,
   SEARCH_WEIGHT_VEC,
+  SPLITTER_MAX_CHUNK_SIZE,
   VECTOR_SEARCH_MULTIPLIER,
 } from "../utils/config";
 import { logger } from "../utils/logger";
+import { compareVersionsDescending } from "../utils/version";
 import { applyMigrations } from "./applyMigrations";
 import { EmbeddingConfig, type EmbeddingModelConfig } from "./embeddings/EmbeddingConfig";
 import {
@@ -23,22 +22,23 @@ import {
   UnsupportedProviderError,
 } from "./embeddings/EmbeddingFactory";
 import { ConnectionError, DimensionError, StoreError } from "./errors";
-import type { StoredScraperOptions } from "./types";
+import type { DbChunkMetadata, DbChunkRank, StoredScraperOptions } from "./types";
 import {
-  type DbDocument,
-  type DbJoinedDocument,
+  type DbChunk,
+  type DbLibraryVersion,
+  type DbPage,
+  type DbPageChunk,
   type DbQueryResult,
   type DbVersion,
   type DbVersionWithLibrary,
   denormalizeVersionName,
-  mapDbDocumentToDocument,
   normalizeVersionName,
   VECTOR_DIMENSION,
   type VersionScraperOptions,
   type VersionStatus,
 } from "./types";
 
-interface RawSearchResult extends DbDocument {
+interface RawSearchResult extends DbChunk {
   // Page fields joined from pages table
   url?: string;
   title?: string;
@@ -67,6 +67,18 @@ export class DocumentStore {
   private modelDimension!: number;
   private readonly embeddingConfig?: EmbeddingModelConfig | null;
   private isVectorSearchEnabled: boolean = false;
+
+  /**
+   * Returns the active embedding configuration if vector search is enabled,
+   * or null if embeddings are disabled (no config provided or credentials unavailable).
+   */
+  getActiveEmbeddingConfig(): EmbeddingModelConfig | null {
+    if (!this.isVectorSearchEnabled || !this.embeddingConfig) {
+      return null;
+    }
+    return this.embeddingConfig;
+  }
+
   private statements!: {
     getById: Database.Statement<[bigint]>;
     // Updated for new schema - documents table now uses page_id
@@ -75,11 +87,12 @@ export class DocumentStore {
     insertEmbedding: Database.Statement<[bigint, string]>;
     // New statement for pages table
     insertPage: Database.Statement<
-      [number, string, string, string | null, string | null, string | null]
+      [number, string, string, string | null, string | null, string | null, number | null]
     >;
     getPageId: Database.Statement<[number, string]>;
     deleteDocuments: Database.Statement<[string, string]>;
-    deleteDocumentsByUrl: Database.Statement<[string, string, string]>;
+    deleteDocumentsByPageId: Database.Statement<[number]>;
+    deletePage: Database.Statement<[number]>;
     deletePages: Database.Statement<[string, string]>;
     queryVersions: Database.Statement<[string]>;
     checkExists: Database.Statement<[string, string]>;
@@ -96,6 +109,7 @@ export class DocumentStore {
     getParentChunk: Database.Statement<[string, string, string, string, bigint]>;
     insertLibrary: Database.Statement<[string]>;
     getLibraryIdByName: Database.Statement<[string]>;
+    getLibraryById: Database.Statement<[number]>;
     // New version-related statements
     insertVersion: Database.Statement<[number, string | null]>;
     resolveVersionId: Database.Statement<[number, string | null]>;
@@ -114,6 +128,7 @@ export class DocumentStore {
     deleteLibraryById: Database.Statement<[number]>;
     countVersionsByLibraryId: Database.Statement<[number]>;
     getVersionId: Database.Statement<[string, string]>;
+    getPagesByVersionId: Database.Statement<[number]>;
   };
 
   /**
@@ -184,7 +199,7 @@ export class DocumentStore {
   private prepareStatements(): void {
     const statements = {
       getById: this.db.prepare<[bigint]>(
-        `SELECT d.*, p.url, p.title, p.content_type 
+        `SELECT d.id, d.page_id, d.content, json(d.metadata) as metadata, d.sort_order, d.embedding, d.created_at, p.url, p.title, p.content_type 
          FROM documents d
          JOIN pages p ON d.page_id = p.id
          WHERE d.id = ?`,
@@ -197,9 +212,17 @@ export class DocumentStore {
         "UPDATE documents SET embedding = ? WHERE id = ?",
       ),
       insertPage: this.db.prepare<
-        [number, string, string, string | null, string | null, string | null]
+        [
+          number,
+          string,
+          string,
+          string | null,
+          string | null,
+          string | null,
+          number | null,
+        ]
       >(
-        "INSERT INTO pages (version_id, url, title, etag, last_modified, content_type) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(version_id, url) DO UPDATE SET title = excluded.title, content_type = excluded.content_type",
+        "INSERT INTO pages (version_id, url, title, etag, last_modified, content_type, depth) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(version_id, url) DO UPDATE SET title = excluded.title, content_type = excluded.content_type, etag = excluded.etag, last_modified = excluded.last_modified, depth = excluded.depth",
       ),
       getPageId: this.db.prepare<[number, string]>(
         "SELECT id FROM pages WHERE version_id = ? AND url = ?",
@@ -210,12 +233,13 @@ export class DocumentStore {
       getLibraryIdByName: this.db.prepare<[string]>(
         "SELECT id FROM libraries WHERE name = ?",
       ),
+      getLibraryById: this.db.prepare<[number]>("SELECT * FROM libraries WHERE id = ?"),
       // New version-related statements
-      insertVersion: this.db.prepare<[number, string | null]>(
+      insertVersion: this.db.prepare<[number, string]>(
         "INSERT INTO versions (library_id, name, status) VALUES (?, ?, 'not_indexed') ON CONFLICT(library_id, name) DO NOTHING",
       ),
-      resolveVersionId: this.db.prepare<[number, string | null]>(
-        "SELECT id FROM versions WHERE library_id = ? AND name IS ?",
+      resolveVersionId: this.db.prepare<[number, string]>(
+        "SELECT id FROM versions WHERE library_id = ? AND name = ?",
       ),
       getVersionById: this.db.prepare<[number]>("SELECT * FROM versions WHERE id = ?"),
       queryVersionsByLibraryId: this.db.prepare<[number]>(
@@ -230,15 +254,10 @@ export class DocumentStore {
            WHERE l.name = ? AND COALESCE(v.name, '') = COALESCE(?, '')
          )`,
       ),
-      deleteDocumentsByUrl: this.db.prepare<[string, string, string]>(
-        `DELETE FROM documents 
-         WHERE page_id IN (
-           SELECT p.id FROM pages p
-           JOIN versions v ON p.version_id = v.id
-           JOIN libraries l ON v.library_id = l.id
-           WHERE p.url = ? AND l.name = ? AND COALESCE(v.name, '') = COALESCE(?, '')
-         )`,
+      deleteDocumentsByPageId: this.db.prepare<[number]>(
+        "DELETE FROM documents WHERE page_id = ?",
       ),
+      deletePage: this.db.prepare<[number]>("DELETE FROM pages WHERE id = ?"),
       deletePages: this.db.prepare<[string, string]>(
         `DELETE FROM pages 
          WHERE version_id IN (
@@ -296,7 +315,7 @@ export class DocumentStore {
       getChildChunks: this.db.prepare<
         [string, string, string, number, string, bigint, number]
       >(`
-        SELECT d.*, p.url, p.title, p.content_type FROM documents d
+        SELECT d.id, d.page_id, d.content, json(d.metadata) as metadata, d.sort_order, d.embedding, d.created_at, p.url, p.title, p.content_type FROM documents d
         JOIN pages p ON d.page_id = p.id
         JOIN versions v ON p.version_id = v.id
         JOIN libraries l ON v.library_id = l.id
@@ -312,7 +331,7 @@ export class DocumentStore {
       getPrecedingSiblings: this.db.prepare<
         [string, string, string, bigint, string, number]
       >(`
-        SELECT d.*, p.url, p.title, p.content_type FROM documents d
+        SELECT d.id, d.page_id, d.content, json(d.metadata) as metadata, d.sort_order, d.embedding, d.created_at, p.url, p.title, p.content_type FROM documents d
         JOIN pages p ON d.page_id = p.id
         JOIN versions v ON p.version_id = v.id
         JOIN libraries l ON v.library_id = l.id
@@ -327,7 +346,7 @@ export class DocumentStore {
       getSubsequentSiblings: this.db.prepare<
         [string, string, string, bigint, string, number]
       >(`
-        SELECT d.*, p.url, p.title, p.content_type FROM documents d
+        SELECT d.id, d.page_id, d.content, json(d.metadata) as metadata, d.sort_order, d.embedding, d.created_at, p.url, p.title, p.content_type FROM documents d
         JOIN pages p ON d.page_id = p.id
         JOIN versions v ON p.version_id = v.id
         JOIN libraries l ON v.library_id = l.id
@@ -340,7 +359,7 @@ export class DocumentStore {
         LIMIT ?
       `),
       getParentChunk: this.db.prepare<[string, string, string, string, bigint]>(`
-        SELECT d.*, p.url, p.title, p.content_type FROM documents d
+        SELECT d.id, d.page_id, d.content, json(d.metadata) as metadata, d.sort_order, d.embedding, d.created_at, p.url, p.title, p.content_type FROM documents d
         JOIN pages p ON d.page_id = p.id
         JOIN versions v ON p.version_id = v.id
         JOIN libraries l ON v.library_id = l.id
@@ -382,6 +401,9 @@ export class DocumentStore {
         `SELECT v.id, v.library_id FROM versions v
          JOIN libraries l ON v.library_id = l.id
          WHERE l.name = ? AND COALESCE(v.name, '') = COALESCE(?, '')`,
+      ),
+      getPagesByVersionId: this.db.prepare<[number]>(
+        "SELECT * FROM pages WHERE version_id = ?",
       ),
     };
     this.statements = statements;
@@ -429,7 +451,7 @@ export class DocumentStore {
     // Check if credentials are available for the provider
     if (!areCredentialsAvailable(config.provider)) {
       logger.warn(
-        `⚠️ No credentials found for ${config.provider} embedding provider. Vector search is disabled.\n` +
+        `⚠️  No credentials found for ${config.provider} embedding provider. Vector search is disabled.\n` +
           `   Only full-text search will be available. To enable vector search, please configure the required\n` +
           `   environment variables for ${config.provider} or choose a different provider.\n` +
           `   See README.md for configuration options or run with --help for more details.`,
@@ -446,8 +468,29 @@ export class DocumentStore {
         this.modelDimension = config.dimensions;
       } else {
         // Fallback: determine the model's actual dimension by embedding a test string
-        const testVector = await this.embeddings.embedQuery("test");
-        this.modelDimension = testVector.length;
+        // Use a timeout to fail fast if the embedding service is unreachable
+        const EMBEDDING_INIT_TIMEOUT_MS = 30_000; // 30 seconds
+
+        const testPromise = this.embeddings.embedQuery("test");
+        let timeoutId: NodeJS.Timeout | undefined;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(
+              new Error(
+                `Embedding service connection timed out after ${EMBEDDING_INIT_TIMEOUT_MS / 1000} seconds`,
+              ),
+            );
+          }, EMBEDDING_INIT_TIMEOUT_MS);
+        });
+
+        try {
+          const testVector = await Promise.race([testPromise, timeoutPromise]);
+          this.modelDimension = testVector.length;
+        } finally {
+          if (timeoutId !== undefined) {
+            clearTimeout(timeoutId);
+          }
+        }
 
         // Cache the discovered dimensions for future use
         EmbeddingConfig.setKnownModelDimensions(config.model, this.modelDimension);
@@ -470,7 +513,7 @@ export class DocumentStore {
           error.message.includes("MODEL_NOT_FOUND")
         ) {
           throw new ModelConfigurationError(
-            `❌ Invalid embedding model: ${config.model}\n` +
+            `Invalid embedding model: ${config.model}\n` +
               `   The model "${config.model}" is not available or you don't have access to it.\n` +
               "   See README.md for supported models or run with --help for more details.",
           );
@@ -481,9 +524,26 @@ export class DocumentStore {
           error.message.includes("authentication")
         ) {
           throw new ModelConfigurationError(
-            `❌ Authentication failed for ${config.provider} embedding provider\n` +
+            `Authentication failed for ${config.provider} embedding provider\n` +
               "   Please check your API key configuration.\n" +
               "   See README.md for configuration options or run with --help for more details.",
+          );
+        }
+        // Handle network-related errors (timeout, connection refused, etc.)
+        if (
+          error.message.includes("timed out") ||
+          error.message.includes("ECONNREFUSED") ||
+          error.message.includes("ENOTFOUND") ||
+          error.message.includes("ETIMEDOUT") ||
+          error.message.includes("ECONNRESET") ||
+          error.message.includes("network") ||
+          error.message.includes("fetch failed")
+        ) {
+          throw new ModelConfigurationError(
+            `Failed to connect to ${config.provider} embedding service\n` +
+              `   ${error.message}\n` +
+              `   Please check that the embedding service is running and accessible.\n` +
+              `   If using a local model (e.g., Ollama), ensure the service is started.`,
           );
         }
       }
@@ -493,39 +553,91 @@ export class DocumentStore {
   }
 
   /**
-   * Generates a dual-mode FTS query that combines phrase and keyword matching.
-   * Creates a query like: "exact phrase" OR ("word1" OR "word2" OR "word3")
-   * This provides better recall by matching both exact phrases and individual terms,
-   * while safely handling special FTS keywords by quoting everything.
+   * Generates a safe FTS query by tokenizing the input and escaping for FTS5.
+   *
+   * Strategy:
+   * - Quotes toggle between "phrase mode" and "word mode" (simple state machine)
+   * - Text inside quotes becomes a single phrase token
+   * - Text outside quotes is split by whitespace into word tokens
+   * - All tokens are escaped (double quotes -> "") and wrapped in quotes for safety
+   *
+   * This prevents FTS5 syntax errors while supporting intuitive phrase searches.
+   *
+   * Query construction:
+   * - Exact match of full input: `("escaped full query")`
+   * - Individual terms: `("term1" AND "term2" AND "phrase")`
+   * - Combined: `("full query") OR ("term1" AND "term2")`
+   *
+   * Examples:
+   * - `foo bar` -> `("foo bar") OR ("foo" AND "bar")`
+   * - `"hello world"` -> `("hello world")`
+   * - `test "exact phrase" word` -> `("test exact phrase word") OR ("test" AND "exact phrase" AND "word")`
    */
   private escapeFtsQuery(query: string): string {
-    // If the query already contains quotes, respect them and return as-is (escaped)
-    if (query.includes('"')) {
-      return query.replace(/"/g, '""');
+    // Tokenize the query using a simple quote-toggle state machine
+    const tokens: string[] = [];
+    let currentToken = "";
+    let inQuote = false;
+
+    for (let i = 0; i < query.length; i++) {
+      const char = query[i];
+
+      if (char === '"') {
+        // Toggle quote mode
+        if (inQuote) {
+          // Closing quote: save the current phrase token
+          if (currentToken.length > 0) {
+            tokens.push(currentToken);
+            currentToken = "";
+          }
+          inQuote = false;
+        } else {
+          // Opening quote: save any accumulated word token first
+          if (currentToken.length > 0) {
+            tokens.push(currentToken);
+            currentToken = "";
+          }
+          inQuote = true;
+        }
+      } else if (char === " " && !inQuote) {
+        // Whitespace outside quotes: token separator
+        if (currentToken.length > 0) {
+          tokens.push(currentToken);
+          currentToken = "";
+        }
+      } else {
+        // Regular character: accumulate
+        currentToken += char;
+      }
     }
 
-    // Escape internal double quotes for the phrase part
-    const escapedQuotes = query.replace(/"/g, '""');
-    const phraseQuery = `"${escapedQuotes}"`;
-
-    // Split query into individual terms for keyword matching
-    const terms = query
-      .trim()
-      .split(/\s+/)
-      .filter((term) => term.length > 0);
-
-    // If only one term, just return the phrase query
-    if (terms.length <= 1) {
-      return phraseQuery;
+    // Save any remaining token
+    if (currentToken.length > 0) {
+      tokens.push(currentToken);
     }
 
-    // Create keyword query with each term safely quoted: ("term1" OR "term2" OR "term3")
-    const keywordQuery = terms
-      .map((term) => `"${term.replace(/"/g, '""')}"`)
-      .join(" OR ");
+    // Handle empty query or only whitespace
+    if (tokens.length === 0) {
+      return '""';
+    }
 
-    // Combine phrase and keyword queries
-    return `${phraseQuery} OR (${keywordQuery})`;
+    // Escape and quote each token for FTS5 safety
+    const escapedTokens = tokens.map((token) => {
+      const escaped = token.replace(/"/g, '""');
+      return `"${escaped}"`;
+    });
+
+    // If single token, just return it
+    if (escapedTokens.length === 1) {
+      return escapedTokens[0];
+    }
+
+    // Build query: (Exact match of semantic content) OR (Terms ORed together)
+    // Join tokens with space to match the semantic phrase, not the syntactic quotes
+    const exactMatch = `"${tokens.join(" ").replace(/"/g, '""')}"`;
+    const termsQuery = escapedTokens.join(" OR ");
+
+    return `${exactMatch} OR ${termsQuery}`;
   }
 
   /**
@@ -587,7 +699,7 @@ export class DocumentStore {
     this.statements.insertVersion.run(libraryId, normalizedVersion);
     const versionIdRow = this.statements.resolveVersionId.get(
       libraryId,
-      normalizedVersion === null ? "" : normalizedVersion,
+      normalizedVersion,
     ) as { id: number } | undefined;
     if (!versionIdRow || typeof versionIdRow.id !== "number") {
       throw new StoreError(
@@ -666,14 +778,85 @@ export class DocumentStore {
   }
 
   /**
+   * Retrieves a version by its ID.
+   * @param versionId The version ID to retrieve
+   * @returns The version record, or null if not found
+   */
+  async getVersionById(versionId: number): Promise<DbVersion | null> {
+    try {
+      const row = this.statements.getVersionById.get(versionId) as DbVersion | undefined;
+      return row || null;
+    } catch (error) {
+      throw new StoreError(`Failed to get version by ID: ${error}`);
+    }
+  }
+
+  /**
+   * Retrieves a library by its ID.
+   * @param libraryId The library ID to retrieve
+   * @returns The library record, or null if not found
+   */
+  async getLibraryById(libraryId: number): Promise<{ id: number; name: string } | null> {
+    try {
+      const row = this.statements.getLibraryById.get(libraryId) as
+        | { id: number; name: string }
+        | undefined;
+      return row || null;
+    } catch (error) {
+      throw new StoreError(`Failed to get library by ID: ${error}`);
+    }
+  }
+
+  /**
+   * Retrieves a library by its name.
+   * @param name The library name to retrieve
+   * @returns The library record, or null if not found
+   */
+  async getLibrary(name: string): Promise<{ id: number; name: string } | null> {
+    try {
+      const normalizedName = name.toLowerCase();
+      const row = this.statements.getLibraryIdByName.get(normalizedName) as
+        | { id: number }
+        | undefined;
+      if (!row) {
+        return null;
+      }
+      return { id: row.id, name: normalizedName };
+    } catch (error) {
+      throw new StoreError(`Failed to get library by name: ${error}`);
+    }
+  }
+
+  /**
+   * Deletes a library by its ID.
+   * This should only be called when the library has no remaining versions.
+   * @param libraryId The library ID to delete
+   */
+  async deleteLibrary(libraryId: number): Promise<void> {
+    try {
+      this.statements.deleteLibraryById.run(libraryId);
+    } catch (error) {
+      throw new StoreError(`Failed to delete library: ${error}`);
+    }
+  }
+
+  /**
    * Stores scraper options for a version to enable reproducible indexing.
    * @param versionId The version ID to update
    * @param options Complete scraper options used for indexing
    */
   async storeScraperOptions(versionId: number, options: ScraperOptions): Promise<void> {
     try {
-      // biome-ignore lint/correctness/noUnusedVariables: Extract source URL and exclude runtime-only fields using destructuring
-      const { url: source_url, library, version, signal, ...scraper_options } = options;
+      // Extract source URL and exclude runtime-only fields using destructuring
+      const {
+        url: source_url,
+        library: _library,
+        version: _version,
+        signal: _signal,
+        initialQueue: _initialQueue,
+        isRefresh: _isRefresh,
+        ...scraper_options
+      } = options;
 
       const optionsJson = JSON.stringify(scraper_options);
       this.statements.updateVersionScraperOptions.run(source_url, optionsJson, versionId);
@@ -701,7 +884,7 @@ export class DocumentStore {
         try {
           parsed = JSON.parse(row.scraper_options) as VersionScraperOptions;
         } catch (e) {
-          logger.warn(`⚠️ Invalid scraper_options JSON for version ${versionId}: ${e}`);
+          logger.warn(`⚠️  Invalid scraper_options JSON for version ${versionId}: ${e}`);
           parsed = {} as VersionScraperOptions;
         }
       }
@@ -765,21 +948,7 @@ export class DocumentStore {
     >
   > {
     try {
-      // Define the expected row structure from the GROUP BY query (including versions without documents)
-      interface LibraryVersionRow {
-        library: string;
-        version: string;
-        versionId: number;
-        status: VersionStatus;
-        progressPages: number;
-        progressMaxPages: number;
-        sourceUrl: string | null;
-        documentCount: number;
-        uniqueUrlCount: number;
-        indexedAt: string | null; // MIN() may return null
-      }
-
-      const rows = this.statements.queryLibraryVersions.all() as LibraryVersionRow[];
+      const rows = this.statements.queryLibraryVersions.all() as DbLibraryVersion[];
       const libraryMap = new Map<
         string,
         Array<{
@@ -819,31 +988,108 @@ export class DocumentStore {
         });
       }
 
-      // Sort versions within each library: unversioned first, then semantically
+      // Sort versions within each library: descending (latest first), unversioned is "latest"
       for (const versions of libraryMap.values()) {
-        versions.sort((a, b) => {
-          if (a.version === "" && b.version !== "") {
-            return -1; // a (unversioned) comes first
-          }
-          if (a.version !== "" && b.version === "") {
-            return 1; // b (unversioned) comes first
-          }
-          if (a.version === "" && b.version === "") {
-            return 0; // Should not happen with GROUP BY, but handle anyway
-          }
-          // Both are non-empty, use semver compare with fallback to string compare
-          try {
-            return semver.compare(a.version, b.version);
-          } catch (_error) {
-            // Fallback to lexicographic comparison if semver parsing fails
-            return a.version.localeCompare(b.version);
-          }
-        });
+        versions.sort((a, b) => compareVersionsDescending(a.version, b.version));
       }
 
       return libraryMap;
     } catch (error) {
       throw new ConnectionError("Failed to query library versions", error);
+    }
+  }
+
+  /**
+   * Helper method to detect if an error is related to input size limits.
+   * Checks for common error messages from various embedding providers.
+   */
+  private isInputSizeError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+
+    const message = error.message.toLowerCase();
+    return (
+      message.includes("maximum context length") ||
+      message.includes("too long") ||
+      message.includes("token limit") ||
+      message.includes("input is too large") ||
+      message.includes("exceeds") ||
+      (message.includes("max") && message.includes("token"))
+    );
+  }
+
+  /**
+   * Creates embeddings for an array of texts with automatic retry logic for size-related errors.
+   * If a batch fails due to size limits:
+   * - Batches with multiple texts are split in half and retried recursively
+   * - Single texts that are too large are truncated and retried once
+   *
+   * @param texts Array of texts to embed
+   * @param isRetry Internal flag to prevent duplicate warning logs
+   * @returns Array of embedding vectors
+   */
+  private async embedDocumentsWithRetry(
+    texts: string[],
+    isRetry = false,
+  ): Promise<number[][]> {
+    if (texts.length === 0) {
+      return [];
+    }
+
+    try {
+      // Try to embed the batch normally
+      return await this.embeddings.embedDocuments(texts);
+    } catch (error) {
+      // Check if this is a size-related error
+      if (this.isInputSizeError(error)) {
+        if (texts.length > 1) {
+          // Split batch in half and retry each half recursively
+          const midpoint = Math.floor(texts.length / 2);
+          const firstHalf = texts.slice(0, midpoint);
+          const secondHalf = texts.slice(midpoint);
+
+          // Only log if this is not already a retry
+          if (!isRetry) {
+            logger.warn(
+              `⚠️  Batch of ${texts.length} texts exceeded size limit, splitting into ${firstHalf.length} + ${secondHalf.length}`,
+            );
+          }
+
+          const [firstEmbeddings, secondEmbeddings] = await Promise.all([
+            this.embedDocumentsWithRetry(firstHalf, true),
+            this.embedDocumentsWithRetry(secondHalf, true),
+          ]);
+
+          return [...firstEmbeddings, ...secondEmbeddings];
+        } else {
+          // Single text that's too large - split in half and retry
+          const text = texts[0];
+          const midpoint = Math.floor(text.length / 2);
+          const firstHalf = text.substring(0, midpoint);
+
+          // Only log once for the original text
+          if (!isRetry) {
+            logger.warn(
+              `⚠️  Single text exceeded embedding size limit (${text.length} chars).`,
+            );
+          }
+
+          try {
+            // Recursively retry with first half only (mark as retry to prevent duplicate logs)
+            // This preserves the beginning of the text which typically contains the most important context
+            const embedding = await this.embedDocumentsWithRetry([firstHalf], true);
+            return embedding;
+          } catch (retryError) {
+            // If even split text fails, log error and throw
+            logger.error(
+              `❌ Failed to embed even after splitting. Original length: ${text.length}`,
+            );
+            throw retryError;
+          }
+        }
+      }
+
+      // Not a size error, re-throw
+      throw error;
     }
   }
 
@@ -855,35 +1101,33 @@ export class DocumentStore {
   async addDocuments(
     library: string,
     version: string,
-    documents: Document[],
+    depth: number,
+    result: ScrapeResult,
   ): Promise<void> {
     try {
-      if (documents.length === 0) {
+      const { title, url, chunks } = result;
+      if (chunks.length === 0) {
         return;
-      }
-
-      // Group documents by URL to create pages
-      const documentsByUrl = new Map<string, Document[]>();
-      for (const doc of documents) {
-        const url = doc.metadata.url as string;
-        if (!url || typeof url !== "string" || !url.trim()) {
-          throw new StoreError("Document metadata must include a valid URL");
-        }
-
-        if (!documentsByUrl.has(url)) {
-          documentsByUrl.set(url, []);
-        }
-        documentsByUrl.get(url)?.push(doc);
       }
 
       // Generate embeddings in batch only if vector search is enabled
       let paddedEmbeddings: number[][] = [];
 
       if (this.isVectorSearchEnabled) {
-        const texts = documents.map((doc) => {
-          const header = `<title>${doc.metadata.title}</title>\n<url>${doc.metadata.url}</url>\n<path>${(doc.metadata.path || []).join(" / ")}</path>\n`;
-          return `${header}${doc.pageContent}`;
+        const texts = chunks.map((chunk) => {
+          const header = `<title>${title}</title>\n<url>${url}</url>\n<path>${(chunk.section.path || []).join(" / ")}</path>\n`;
+          return `${header}${chunk.content}`;
         });
+
+        // Validate chunk sizes before creating embeddings
+        for (let i = 0; i < texts.length; i++) {
+          const textSize = texts[i].length;
+          if (textSize > SPLITTER_MAX_CHUNK_SIZE) {
+            logger.warn(
+              `⚠️  Chunk ${i + 1}/${texts.length} exceeds max size: ${textSize} > ${SPLITTER_MAX_CHUNK_SIZE} chars (URL: ${url})`,
+            );
+          }
+        }
 
         // Batch embedding creation to avoid token limit errors
         const maxBatchChars = EMBEDDING_BATCH_CHARS;
@@ -902,7 +1146,7 @@ export class DocumentStore {
             logger.debug(
               `Processing embedding batch ${batchCount}: ${currentBatch.length} texts, ${currentBatchSize} chars`,
             );
-            const batchEmbeddings = await this.embeddings.embedDocuments(currentBatch);
+            const batchEmbeddings = await this.embedDocumentsWithRetry(currentBatch);
             rawEmbeddings.push(...batchEmbeddings);
             currentBatch = [];
             currentBatchSize = 0;
@@ -918,7 +1162,7 @@ export class DocumentStore {
             logger.debug(
               `Processing embedding batch ${batchCount}: ${currentBatch.length} texts, ${currentBatchSize} chars`,
             );
-            const batchEmbeddings = await this.embeddings.embedDocuments(currentBatch);
+            const batchEmbeddings = await this.embedDocumentsWithRetry(currentBatch);
             rawEmbeddings.push(...batchEmbeddings);
             currentBatch = [];
             currentBatchSize = 0;
@@ -931,7 +1175,7 @@ export class DocumentStore {
           logger.debug(
             `Processing final embedding batch ${batchCount}: ${currentBatch.length} texts, ${currentBatchSize} chars`,
           );
-          const batchEmbeddings = await this.embeddings.embedDocuments(currentBatch);
+          const batchEmbeddings = await this.embedDocumentsWithRetry(currentBatch);
           rawEmbeddings.push(...batchEmbeddings);
         }
         paddedEmbeddings = rawEmbeddings.map((vector) => this.padVector(vector));
@@ -940,106 +1184,104 @@ export class DocumentStore {
       // Resolve library and version IDs (creates them if they don't exist)
       const versionId = await this.resolveVersionId(library, version);
 
-      // Delete existing documents for these URLs to prevent conflicts
-      for (const url of documentsByUrl.keys()) {
-        const deletedCount = await this.deleteDocumentsByUrl(library, version, url);
-        if (deletedCount > 0) {
-          logger.debug(`Deleted ${deletedCount} existing documents for URL: ${url}`);
+      // Delete existing documents for this page to prevent conflicts
+      // First check if the page exists and get its ID
+      const existingPage = this.statements.getPageId.get(versionId, url) as
+        | { id: number }
+        | undefined;
+
+      if (existingPage) {
+        const result = this.statements.deleteDocumentsByPageId.run(existingPage.id);
+        if (result.changes > 0) {
+          logger.debug(`Deleted ${result.changes} existing documents for URL: ${url}`);
         }
       }
 
       // Insert documents in a transaction
-      const transaction = this.db.transaction((docsByUrl: Map<string, Document[]>) => {
-        // First, create or update pages for each unique URL
-        const pageIds = new Map<string, number>();
+      const transaction = this.db.transaction(() => {
+        // Extract content type from metadata if available
+        const contentType = result.contentType || null;
 
-        for (const [url, urlDocs] of docsByUrl) {
-          // Use the first document's metadata for page-level data
-          const firstDoc = urlDocs[0];
-          const title = firstDoc.metadata.title || "";
-          // Extract content type from metadata if available
-          const contentType = firstDoc.metadata.contentType || null;
+        // Extract etag from document metadata if available
+        const etag = result.etag || null;
 
-          // Insert or update page record
-          this.statements.insertPage.run(
-            versionId,
-            url,
-            title,
-            null, // etag - will be populated during scraping
-            null, // last_modified - will be populated during scraping
-            contentType,
-          );
+        // Extract lastModified from document metadata if available
+        const lastModified = result.lastModified || null;
 
-          // Query for the page ID since we can't use RETURNING
-          const existingPage = this.statements.getPageId.get(versionId, url) as
-            | { id: number }
-            | undefined;
-          if (!existingPage) {
-            throw new StoreError(`Failed to get page ID for URL: ${url}`);
-          }
-          const pageId = existingPage.id;
-          pageIds.set(url, pageId);
+        // Insert or update page record
+        this.statements.insertPage.run(
+          versionId,
+          url,
+          title || "",
+          etag,
+          lastModified,
+          contentType,
+          depth,
+        );
+
+        // Query for the page ID since we can't use RETURNING
+        const existingPage = this.statements.getPageId.get(versionId, url) as
+          | { id: number }
+          | undefined;
+        if (!existingPage) {
+          throw new StoreError(`Failed to get page ID for URL: ${url}`);
         }
+        const pageId = existingPage.id;
 
         // Then insert document chunks linked to their pages
         let docIndex = 0;
-        for (const [url, urlDocs] of docsByUrl) {
-          const pageId = pageIds.get(url);
-          if (!pageId) {
-            throw new StoreError(`Failed to get page ID for URL: ${url}`);
-          }
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
 
-          for (let i = 0; i < urlDocs.length; i++) {
-            const doc = urlDocs[i];
+          // Insert document chunk
+          const result = this.statements.insertDocument.run(
+            pageId,
+            chunk.content,
+            JSON.stringify({
+              types: chunk.types,
+              level: chunk.section.level,
+              path: chunk.section.path,
+            } satisfies DbChunkMetadata),
+            i, // sort_order within this page
+          );
+          const rowId = result.lastInsertRowid;
 
-            // Create chunk-specific metadata (remove page-level fields)
-            const {
-              url: _,
-              title: __,
-              library: ___,
-              version: ____,
-              ...chunkMetadata
-            } = doc.metadata;
-
-            // Insert document chunk
-            const result = this.statements.insertDocument.run(
-              pageId,
-              doc.pageContent,
-              JSON.stringify(chunkMetadata),
-              i, // sort_order within this page
+          // Insert into vector table only if vector search is enabled
+          if (this.isVectorSearchEnabled && paddedEmbeddings.length > 0) {
+            this.statements.insertEmbedding.run(
+              BigInt(rowId),
+              JSON.stringify(paddedEmbeddings[docIndex]),
             );
-            const rowId = result.lastInsertRowid;
-
-            // Insert into vector table only if vector search is enabled
-            if (this.isVectorSearchEnabled && paddedEmbeddings.length > 0) {
-              this.statements.insertEmbedding.run(
-                BigInt(rowId),
-                JSON.stringify(paddedEmbeddings[docIndex]),
-              );
-            }
-
-            docIndex++;
           }
+
+          docIndex++;
         }
       });
 
-      transaction(documentsByUrl);
+      transaction();
     } catch (error) {
       throw new ConnectionError("Failed to add documents to store", error);
     }
   }
 
   /**
-   * Removes documents matching specified library and version
+   * Removes documents and pages matching specified library and version.
+   * This consolidated method deletes both documents and their associated pages.
    * @returns Number of documents deleted
    */
-  async deleteDocuments(library: string, version: string): Promise<number> {
+  async deletePages(library: string, version: string): Promise<number> {
     try {
       const normalizedVersion = version.toLowerCase();
+
+      // First delete documents
       const result = this.statements.deleteDocuments.run(
         library.toLowerCase(),
         normalizedVersion,
       );
+
+      // Then delete the pages (after documents are gone, due to foreign key constraints)
+      this.statements.deletePages.run(library.toLowerCase(), normalizedVersion);
+
       return result.changes;
     } catch (error) {
       throw new ConnectionError("Failed to delete documents", error);
@@ -1047,24 +1289,40 @@ export class DocumentStore {
   }
 
   /**
-   * Removes documents for a specific URL within a library and version
-   * @returns Number of documents deleted
+   * Deletes a page and all its associated document chunks.
+   * Performs manual deletion in the correct order to satisfy foreign key constraints:
+   * 1. Delete document chunks (page_id references pages.id)
+   * 2. Delete page record
+   *
+   * This method is used during refresh operations when a page returns 404 Not Found.
    */
-  async deleteDocumentsByUrl(
-    library: string,
-    version: string,
-    url: string,
-  ): Promise<number> {
+  async deletePage(pageId: number): Promise<void> {
     try {
-      const normalizedVersion = version.toLowerCase();
-      const result = this.statements.deleteDocumentsByUrl.run(
-        url,
-        library.toLowerCase(),
-        normalizedVersion,
-      );
-      return result.changes;
+      // Delete documents first (due to foreign key constraint)
+      const docResult = this.statements.deleteDocumentsByPageId.run(pageId);
+      logger.debug(`Deleted ${docResult.changes} document(s) for page ID ${pageId}`);
+
+      // Then delete the page record
+      const pageResult = this.statements.deletePage.run(pageId);
+      if (pageResult.changes > 0) {
+        logger.debug(`Deleted page record for page ID ${pageId}`);
+      }
     } catch (error) {
-      throw new ConnectionError("Failed to delete documents by URL", error);
+      throw new ConnectionError(`Failed to delete page ${pageId}`, error);
+    }
+  }
+
+  /**
+   * Retrieves all pages for a specific version ID with their metadata.
+   * Used for refresh operations to get existing pages with their ETags and depths.
+   * @returns Array of page records
+   */
+  async getPagesByVersionId(versionId: number): Promise<DbPage[]> {
+    try {
+      const result = this.statements.getPagesByVersionId.all(versionId) as DbPage[];
+      return result;
+    } catch (error) {
+      throw new ConnectionError("Failed to get pages by version ID", error);
     }
   }
 
@@ -1109,7 +1367,7 @@ export class DocumentStore {
       // 4. libraries (if empty)
 
       // Delete all documents for this version
-      const documentsDeleted = await this.deleteDocuments(library, version);
+      const documentsDeleted = await this.deletePages(library, version);
 
       // Delete all pages for this version (must be done after documents, before version)
       this.statements.deletePages.run(normalizedLibrary, normalizedVersion);
@@ -1142,20 +1400,41 @@ export class DocumentStore {
   }
 
   /**
+   * Parses the metadata field from a JSON string to an object.
+   * This is necessary because better-sqlite3's json() function returns a string, not an object.
+   */
+  private parseMetadata<M extends {}, T extends { metadata: M }>(row: T): T {
+    if (row.metadata && typeof row.metadata === "string") {
+      try {
+        row.metadata = JSON.parse(row.metadata);
+      } catch (error) {
+        logger.warn(`Failed to parse metadata JSON: ${error}`);
+        row.metadata = {} as M;
+      }
+    }
+    return row;
+  }
+
+  /**
+   * Parses metadata for an array of rows.
+   */
+  private parseMetadataArray<M extends {}, T extends { metadata: M }>(rows: T[]): T[] {
+    return rows.map((row) => this.parseMetadata(row));
+  }
+
+  /**
    * Retrieves a document by its ID.
    * @param id The ID of the document.
    * @returns The document, or null if not found.
    */
-  async getById(id: string): Promise<Document | null> {
+  async getById(id: string): Promise<DbPageChunk | null> {
     try {
-      const row = this.statements.getById.get(
-        BigInt(id),
-      ) as DbQueryResult<DbJoinedDocument>;
+      const row = this.statements.getById.get(BigInt(id)) as DbQueryResult<DbPageChunk>;
       if (!row) {
         return null;
       }
 
-      return mapDbDocumentToDocument(row);
+      return this.parseMetadata(row);
     } catch (error) {
       throw new ConnectionError(`Failed to get document by ID ${id}`, error);
     }
@@ -1171,7 +1450,7 @@ export class DocumentStore {
     version: string,
     query: string,
     limit: number,
-  ): Promise<Document[]> {
+  ): Promise<(DbPageChunk & DbChunkRank)[]> {
     try {
       // Return empty array for empty or whitespace-only queries
       if (!query || typeof query !== "string" || query.trim().length === 0) {
@@ -1262,25 +1541,20 @@ export class DocumentStore {
           .sort((a, b) => b.rrf_score - a.rrf_score)
           .slice(0, limit);
 
-        return topResults.map((row) => ({
-          ...mapDbDocumentToDocument({
+        return topResults.map((row) => {
+          const result: DbPageChunk = {
             ...row,
             url: row.url || "", // Ensure url is never undefined
-            title: row.title,
-            content_type: row.content_type,
-          } as DbJoinedDocument),
-          metadata: {
-            ...JSON.parse(row.metadata),
-            id: row.id,
+            title: row.title || null,
+            content_type: row.content_type || null,
+          };
+          // Add search scores as additional properties (not in metadata)
+          return Object.assign(result, {
             score: row.rrf_score,
             vec_rank: row.vec_rank,
             fts_rank: row.fts_rank,
-            // Explicitly add page fields if they exist
-            url: row.url || "",
-            title: row.title || "",
-            ...(row.content_type && { contentType: row.content_type }),
-          },
-        }));
+          });
+        });
       } else {
         // Fallback: full-text search only
         const stmt = this.db.prepare(`
@@ -1316,25 +1590,19 @@ export class DocumentStore {
         ) as (RawSearchResult & { fts_score: number })[];
 
         // Assign FTS ranks based on order (best score = rank 1)
-        return rawResults.map((row, index) => ({
-          ...mapDbDocumentToDocument({
+        return rawResults.map((row, index) => {
+          const result: DbPageChunk = {
             ...row,
             url: row.url || "", // Ensure url is never undefined
-            title: row.title,
-            content_type: row.content_type,
-          } as DbJoinedDocument),
-          metadata: {
-            ...JSON.parse(row.metadata),
-            id: row.id,
+            title: row.title || null,
+            content_type: row.content_type || null,
+          };
+          // Add search scores as additional properties (not in metadata)
+          return Object.assign(result, {
             score: -row.fts_score, // Convert BM25 score to positive value for consistency
             fts_rank: index + 1, // Assign rank based on order (1-based)
-            // Explicitly ensure vec_rank is not included in FTS-only mode
-            // Explicitly add page fields
-            url: row.url || "",
-            title: row.title || "",
-            ...(row.content_type && { contentType: row.content_type }),
-          },
-        }));
+          });
+        });
       }
     } catch (error) {
       throw new ConnectionError(
@@ -1352,28 +1620,27 @@ export class DocumentStore {
     version: string,
     id: string,
     limit: number,
-  ): Promise<Document[]> {
+  ): Promise<DbPageChunk[]> {
     try {
       const parent = await this.getById(id);
       if (!parent) {
         return [];
       }
 
-      const parentPath = (parent.metadata as DocumentMetadata).path ?? [];
-      const parentUrl = (parent.metadata as DocumentMetadata).url;
+      const parentPath = parent.metadata.path ?? [];
       const normalizedVersion = version.toLowerCase();
 
       const result = this.statements.getChildChunks.all(
         library.toLowerCase(),
         normalizedVersion,
-        parentUrl,
+        parent.url,
         parentPath.length + 1,
         JSON.stringify(parentPath),
         BigInt(id),
         limit,
-      ) as Array<DbJoinedDocument>;
+      ) as Array<DbPageChunk>;
 
-      return result.map((row) => mapDbDocumentToDocument(row));
+      return this.parseMetadataArray(result);
     } catch (error) {
       throw new ConnectionError(`Failed to find child chunks for ID ${id}`, error);
     }
@@ -1387,26 +1654,25 @@ export class DocumentStore {
     version: string,
     id: string,
     limit: number,
-  ): Promise<Document[]> {
+  ): Promise<DbPageChunk[]> {
     try {
       const reference = await this.getById(id);
       if (!reference) {
         return [];
       }
 
-      const refMetadata = reference.metadata as DocumentMetadata;
       const normalizedVersion = version.toLowerCase();
 
       const result = this.statements.getPrecedingSiblings.all(
         library.toLowerCase(),
         normalizedVersion,
-        refMetadata.url,
+        reference.url,
         BigInt(id),
-        JSON.stringify(refMetadata.path),
+        JSON.stringify(reference.metadata.path),
         limit,
-      ) as Array<DbJoinedDocument>;
+      ) as Array<DbPageChunk>;
 
-      return result.reverse().map((row) => mapDbDocumentToDocument(row));
+      return this.parseMetadataArray(result).reverse();
     } catch (error) {
       throw new ConnectionError(
         `Failed to find preceding sibling chunks for ID ${id}`,
@@ -1423,26 +1689,25 @@ export class DocumentStore {
     version: string,
     id: string,
     limit: number,
-  ): Promise<Document[]> {
+  ): Promise<DbPageChunk[]> {
     try {
       const reference = await this.getById(id);
       if (!reference) {
         return [];
       }
 
-      const refMetadata = reference.metadata;
       const normalizedVersion = version.toLowerCase();
 
       const result = this.statements.getSubsequentSiblings.all(
         library.toLowerCase(),
         normalizedVersion,
-        refMetadata.url,
+        reference.url,
         BigInt(id),
-        JSON.stringify(refMetadata.path),
+        JSON.stringify(reference.metadata.path),
         limit,
-      ) as Array<DbJoinedDocument>;
+      ) as Array<DbPageChunk>;
 
-      return result.map((row) => mapDbDocumentToDocument(row));
+      return this.parseMetadataArray(result);
     } catch (error) {
       throw new ConnectionError(
         `Failed to find subsequent sibling chunks for ID ${id}`,
@@ -1453,20 +1718,21 @@ export class DocumentStore {
 
   /**
    * Finds the parent chunk of a given document.
+   * Returns null if no parent is found or if there's a database error.
+   * Database errors are logged but not thrown to maintain consistent behavior.
    */
   async findParentChunk(
     library: string,
     version: string,
     id: string,
-  ): Promise<Document | null> {
+  ): Promise<DbPageChunk | null> {
     try {
       const child = await this.getById(id);
       if (!child) {
         return null;
       }
 
-      const childMetadata = child.metadata as DocumentMetadata;
-      const path = childMetadata.path ?? [];
+      const path = child.metadata.path ?? [];
       const parentPath = path.slice(0, -1);
 
       if (parentPath.length === 0) {
@@ -1477,37 +1743,38 @@ export class DocumentStore {
       const result = this.statements.getParentChunk.get(
         library.toLowerCase(),
         normalizedVersion,
-        childMetadata.url,
+        child.url,
         JSON.stringify(parentPath),
         BigInt(id),
-      ) as DbQueryResult<DbJoinedDocument>;
+      ) as DbQueryResult<DbPageChunk>;
 
       if (!result) {
         return null;
       }
 
-      return mapDbDocumentToDocument(result);
+      return this.parseMetadata(result);
     } catch (error) {
-      throw new ConnectionError(`Failed to find parent chunk for ID ${id}`, error);
+      logger.warn(`Failed to find parent chunk for ID ${id}: ${error}`);
+      return null;
     }
   }
 
   /**
    * Fetches multiple documents by their IDs in a single call.
-   * Returns an array of Document objects, sorted by their sort_order.
+   * Returns an array of DbPageChunk objects, sorted by their sort_order.
    */
   async findChunksByIds(
     library: string,
     version: string,
     ids: string[],
-  ): Promise<Document[]> {
+  ): Promise<DbPageChunk[]> {
     if (!ids.length) return [];
     try {
       const normalizedVersion = version.toLowerCase();
       // Use parameterized query for variable number of IDs
       const placeholders = ids.map(() => "?").join(",");
       const stmt = this.db.prepare(
-        `SELECT d.*, p.url, p.title, p.content_type FROM documents d
+        `SELECT d.id, d.page_id, d.content, json(d.metadata) as metadata, d.sort_order, d.embedding, d.created_at, p.url, p.title, p.content_type FROM documents d
          JOIN pages p ON d.page_id = p.id
          JOIN versions v ON p.version_id = v.id
          JOIN libraries l ON v.library_id = l.id
@@ -1520,8 +1787,8 @@ export class DocumentStore {
         library.toLowerCase(),
         normalizedVersion,
         ...ids,
-      ) as DbJoinedDocument[];
-      return rows.map((row) => mapDbDocumentToDocument(row));
+      ) as DbPageChunk[];
+      return this.parseMetadataArray(rows);
     } catch (error) {
       throw new ConnectionError("Failed to fetch documents by IDs", error);
     }
@@ -1529,17 +1796,17 @@ export class DocumentStore {
 
   /**
    * Fetches all document chunks for a specific URL within a library and version.
-   * Returns documents sorted by their sort_order for proper reassembly.
+   * Returns DbPageChunk objects sorted by their sort_order for proper reassembly.
    */
   async findChunksByUrl(
     library: string,
     version: string,
     url: string,
-  ): Promise<Document[]> {
+  ): Promise<DbPageChunk[]> {
     try {
       const normalizedVersion = version.toLowerCase();
       const stmt = this.db.prepare(
-        `SELECT d.*, p.url, p.title, p.content_type FROM documents d
+        `SELECT d.id, d.page_id, d.content, json(d.metadata) as metadata, d.sort_order, d.embedding, d.created_at, p.url, p.title, p.content_type FROM documents d
          JOIN pages p ON d.page_id = p.id
          JOIN versions v ON p.version_id = v.id
          JOIN libraries l ON v.library_id = l.id
@@ -1552,8 +1819,8 @@ export class DocumentStore {
         library.toLowerCase(),
         normalizedVersion,
         url,
-      ) as DbJoinedDocument[];
-      return rows.map((row) => mapDbDocumentToDocument(row));
+      ) as DbPageChunk[];
+      return this.parseMetadataArray(rows);
     } catch (error) {
       throw new ConnectionError(`Failed to fetch documents by URL ${url}`, error);
     }

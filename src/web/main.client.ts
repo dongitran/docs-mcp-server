@@ -1,13 +1,23 @@
 /**
  * Bootstraps the client-side experience for the UrBox Document Server web UI.
- * Initializes Alpine stores, HTMX helpers, Flowbite components, and the
- * release checker that surfaces update notifications in the header.
+ * Initializes Alpine stores, HTMX helpers, Flowbite components, the
+ * release checker that surfaces update notifications in the header,
+ * and the unified event client for real-time updates.
  */
 import "./styles/main.css";
 
+import collapse from "@alpinejs/collapse";
 import Alpine from "alpinejs";
+
+// Register Alpine.js plugins before exposing globally
+Alpine.plugin(collapse);
+
+// Expose Alpine globally for Idiomorph and other extensions
+(window as unknown as { Alpine: typeof Alpine }).Alpine = Alpine;
+
 import { initFlowbite } from "flowbite";
-import htmx from "htmx.org";
+import "idiomorph/htmx";
+import { EventClient } from "./EventClient";
 import { fallbackReleaseLabel, isVersionNewer } from "./utils/versionCheck";
 
 const LATEST_RELEASE_ENDPOINT =
@@ -89,12 +99,51 @@ document.addEventListener("alpine:init", () => {
   }));
 });
 
-// Ensure Alpine global store for confirmation actions is initialized before Alpine components render
-Alpine.store("confirmingAction", {
-  type: null,
-  id: null,
-  timeoutId: null,
-  isDeleting: false,
+// Initialize toast store for global notifications
+Alpine.store("toast", {
+  visible: false,
+  message: "",
+  type: "info" as "success" | "error" | "warning" | "info",
+  timeoutId: null as number | null,
+  show(
+    message: string,
+    type: "success" | "error" | "warning" | "info" = "info",
+    duration = 5000,
+  ) {
+    const store = Alpine.store("toast") as {
+      timeoutId: number | null;
+      message: string;
+      type: "success" | "error" | "warning" | "info";
+      visible: boolean;
+      hide: () => void;
+    };
+
+    // Clear any existing timeout
+    if (store.timeoutId !== null) {
+      clearTimeout(store.timeoutId);
+      store.timeoutId = null;
+    }
+
+    store.message = message;
+    store.type = type;
+    store.visible = true;
+
+    // Auto-hide after duration
+    store.timeoutId = window.setTimeout(() => {
+      store.hide();
+    }, duration);
+  },
+  hide() {
+    const store = Alpine.store("toast") as {
+      visible: boolean;
+      timeoutId: number | null;
+    };
+    store.visible = false;
+    if (store.timeoutId !== null) {
+      clearTimeout(store.timeoutId);
+      store.timeoutId = null;
+    }
+  },
 });
 
 Alpine.start();
@@ -102,70 +151,174 @@ Alpine.start();
 // Initialize Flowbite components
 initFlowbite();
 
-// Add a global event listener for 'job-list-refresh' that uses HTMX to reload the job list
-// This is still useful for manual refresh after actions like clearing jobs
-document.addEventListener("job-list-refresh", () => {
-  htmx.ajax("get", "/web/jobs", "#job-queue");
+// NOTE: job-status-change, job-progress, job-list-change, job-list-refresh, and library-change events
+// are handled by hx-trigger attributes in the HTML templates (index.tsx).
+// Do NOT add duplicate listeners here to avoid double requests and state corruption.
+
+// Create and connect the unified event client
+const eventClient = new EventClient();
+
+// Subscribe to events and dispatch them as DOM events for HTMX
+eventClient.subscribe((event) => {
+  console.log(`📋 Received event: ${event.type}`, event.payload);
+  // Dispatch custom event with payload that HTMX can listen to
+  document.body.dispatchEvent(
+    new CustomEvent(event.type, {
+      detail: event.payload,
+    }),
+  );
 });
 
-// Auto-refresh job list every 3 seconds for real-time progress updates
-function autoRefreshJobList() {
-  // Only refresh if the job queue element exists on the current page
-  if (document.querySelector("#job-queue")) {
-    htmx.ajax("get", "/web/jobs", "#job-queue");
+// Start the connection
+eventClient.connect();
+
+// Clean up on page unload
+window.addEventListener("beforeunload", () => {
+  eventClient.disconnect();
+});
+
+// Central confirmation timeout manager
+// Handles timeouts outside of Alpine so they survive DOM refreshes
+const confirmationTimeouts = new Map<string, { timeoutId: number; expiresAt: number }>();
+
+/**
+ * Starts a confirmation timeout for an element.
+ * When timeout expires, it clears the confirming state on the element.
+ */
+function startConfirmationTimeout(elementId: string, duration = 3000) {
+  // Clear any existing timeout for this element
+  clearConfirmationTimeout(elementId);
+
+  const expiresAt = Date.now() + duration;
+  const timeoutId = window.setTimeout(() => {
+    // Timeout fired - clear the state
+    confirmationTimeouts.delete(elementId);
+
+    // Find the element and reset its state
+    const el = document.getElementById(elementId);
+    if (el) {
+      const data = Alpine.$data(el) as { confirming?: boolean } | undefined;
+      if (data) {
+        data.confirming = false;
+      }
+    }
+  }, duration);
+
+  confirmationTimeouts.set(elementId, { timeoutId, expiresAt });
+}
+
+/**
+ * Clears a confirmation timeout for an element.
+ */
+function clearConfirmationTimeout(elementId: string) {
+  const entry = confirmationTimeouts.get(elementId);
+  if (entry) {
+    clearTimeout(entry.timeoutId);
+    confirmationTimeouts.delete(elementId);
   }
 }
 
-// Global variable to track the current interval
-let autoRefreshInterval = setInterval(autoRefreshJobList, 3000);
+/**
+ * Checks if an element has an active confirmation state.
+ */
+function hasActiveConfirmation(elementId: string): boolean {
+  const entry = confirmationTimeouts.get(elementId);
+  return entry !== undefined && entry.expiresAt > Date.now();
+}
 
-// Stop auto-refresh when page is hidden to save resources
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) {
-    clearInterval(autoRefreshInterval);
-  } else {
-    // Restart auto-refresh when page becomes visible again
-    autoRefreshInterval = setInterval(autoRefreshJobList, 3000);
-  }
-});
+// Expose functions globally for use in Alpine components
+const confirmationManager = {
+  start: startConfirmationTimeout,
+  clear: clearConfirmationTimeout,
+  isActive: hasActiveConfirmation,
+};
+(
+  window as unknown as { confirmationManager: typeof confirmationManager }
+).confirmationManager = confirmationManager;
 
-// Add a global event listener for 'version-list-refresh' that reloads the version list container using HTMX
-document.addEventListener("version-list-refresh", (event: Event) => {
-  const customEvent = event as CustomEvent<{ library: string }>;
-  const library = customEvent.detail?.library;
-  if (library) {
-    htmx.ajax(
-      "get",
-      `/web/libraries/${encodeURIComponent(library)}/versions`,
-      "#version-list",
-    );
-  }
-});
-
-// Listen for htmx swaps after a version delete and dispatch version-list-refresh with payload
-document.body.addEventListener("htmx:afterSwap", (event) => {
-  // Always re-initialize AlpineJS for swapped-in DOM to fix $store errors
-  if (event.target instanceof HTMLElement) {
-    Alpine.initTree(event.target);
-  }
-
-  // Existing logic for version delete refresh
+// Handle Alpine lifecycle during HTMX swaps
+document.body.addEventListener("htmx:beforeSwap", (event) => {
   const detail = (event as CustomEvent).detail;
-  if (
-    detail?.xhr?.status === 204 &&
-    detail?.requestConfig?.verb === "delete" &&
-    (event.target as HTMLElement)?.id?.startsWith("row-")
-  ) {
-    // Extract library name from the row id: row-<library>-<version>
-    const rowId = (event.target as HTMLElement).id;
-    const match = rowId.match(/^row-([^-]+)-/);
-    const library = match ? match[1] : null;
-    if (library) {
-      document.dispatchEvent(
-        new CustomEvent("version-list-refresh", { detail: { library } }),
-      );
-    } else {
-      window.location.reload();
+  const target = detail?.target as HTMLElement;
+
+  if (target) {
+    // Destroy Alpine components before HTMX replaces the content
+    Alpine.destroyTree(target);
+  }
+});
+
+// Initialize Alpine on new content after HTMX swap
+document.body.addEventListener("htmx:afterSwap", (event) => {
+  const detail = (event as CustomEvent).detail;
+  const target = detail?.target as HTMLElement;
+
+  if (target) {
+    // Restore confirmation state from central manager before Alpine init
+    target.querySelectorAll<HTMLElement>("[x-data][id]").forEach((el) => {
+      if (el.id && hasActiveConfirmation(el.id)) {
+        el.dataset.confirming = "true";
+      }
+    });
+
+    // Initialize Alpine components on the new content
+    Alpine.initTree(target);
+  }
+});
+
+// Global error handler for HTMX responses
+document.body.addEventListener("htmx:responseError", (event) => {
+  const detail = (event as CustomEvent).detail;
+  const xhr = detail?.xhr;
+
+  if (!xhr) return;
+
+  let errorMessage = "An error occurred";
+
+  // Try to parse JSON error response
+  try {
+    const contentType = xhr.getResponseHeader("content-type");
+    if (contentType?.includes("application/json")) {
+      const errorData = JSON.parse(xhr.response);
+      errorMessage = errorData.message || errorData.error || errorMessage;
+    } else if (xhr.response && typeof xhr.response === "string") {
+      // If response is plain text, use it directly
+      errorMessage = xhr.response;
+    }
+  } catch (_e) {
+    // If parsing fails, use status text or generic message
+    errorMessage = xhr.statusText || errorMessage;
+  }
+
+  // Show error toast
+  const toastStore = Alpine.store("toast") as {
+    show: (message: string, type: "error") => void;
+  };
+  toastStore.show(errorMessage, "error");
+
+  // Prevent HTMX from swapping the error response into the DOM
+  event.preventDefault();
+});
+
+// Global handler for successful responses that may include HX-Trigger with toast data
+document.body.addEventListener("htmx:afterRequest", (event) => {
+  const detail = (event as CustomEvent).detail;
+  const xhr = detail?.xhr;
+
+  if (!xhr || !xhr.getResponseHeader) return;
+
+  // Check for HX-Trigger header with toast data
+  const hxTrigger = xhr.getResponseHeader("HX-Trigger");
+  if (hxTrigger) {
+    try {
+      const triggers = JSON.parse(hxTrigger);
+      if (triggers.toast) {
+        const toastStore = Alpine.store("toast") as {
+          show: (message: string, type: "success" | "error" | "warning" | "info") => void;
+        };
+        toastStore.show(triggers.toast.message, triggers.toast.type || "info");
+      }
+    } catch (e) {
+      console.debug("Failed to parse HX-Trigger header", e);
     }
   }
 });

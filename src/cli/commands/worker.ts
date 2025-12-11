@@ -5,16 +5,16 @@
 import type { Command } from "commander";
 import { Option } from "commander";
 import { startAppServer } from "../../app";
-import type { PipelineOptions } from "../../pipeline";
+import { PipelineFactory, type PipelineOptions } from "../../pipeline";
 import { createLocalDocumentManagement } from "../../store";
-import { analytics, TelemetryEvent } from "../../telemetry";
+import { TelemetryEvent, telemetry } from "../../telemetry";
 import { DEFAULT_HOST, DEFAULT_MAX_CONCURRENCY } from "../../utils/config";
 import { logger } from "../../utils/logger";
 import { registerGlobalServices } from "../main";
 import {
   createAppServerConfig,
-  createPipelineWithCallbacks,
   ensurePlaywrightBrowsersInstalled,
+  getEventBus,
   resolveEmbeddingContext,
   validateHost,
   validatePort,
@@ -53,13 +53,16 @@ export function createWorkerCommand(program: Command): Command {
     .option("--resume", "Resume interrupted jobs on startup", true)
     .option("--no-resume", "Do not resume jobs on startup")
     .action(
-      async (cmdOptions: {
-        port: string;
-        host: string;
-        embeddingModel?: string;
-        resume: boolean;
-      }) => {
-        await analytics.track(TelemetryEvent.CLI_COMMAND, {
+      async (
+        cmdOptions: {
+          port: string;
+          host: string;
+          embeddingModel?: string;
+          resume: boolean;
+        },
+        command?: Command,
+      ) => {
+        await telemetry.track(TelemetryEvent.CLI_COMMAND, {
           command: "worker",
           port: cmdOptions.port,
           host: cmdOptions.host,
@@ -70,8 +73,6 @@ export function createWorkerCommand(program: Command): Command {
         const host = validateHost(cmdOptions.host);
 
         try {
-          logger.info(`🚀 Starting external pipeline worker on port ${port}`);
-
           // Ensure browsers are installed for scraping
           ensurePlaywrightBrowsersInstalled();
 
@@ -81,16 +82,23 @@ export function createWorkerCommand(program: Command): Command {
           // Get global options from root command (which has resolved storePath in preAction hook)
           const globalOptions = program.opts();
 
-          // Initialize services
+          // Get the global EventBusService
+          const eventBus = getEventBus(command);
+
           const docService = await createLocalDocumentManagement(
             globalOptions.storePath,
+            eventBus,
             embeddingConfig,
           );
           const pipelineOptions: PipelineOptions = {
             recoverJobs: cmdOptions.resume, // Use the resume option
             concurrency: DEFAULT_MAX_CONCURRENCY,
           };
-          const pipeline = await createPipelineWithCallbacks(docService, pipelineOptions);
+          const pipeline = await PipelineFactory.createPipeline(
+            docService,
+            eventBus,
+            pipelineOptions,
+          );
 
           // Configure worker-only server
           const config = createAppServerConfig({
@@ -105,7 +113,7 @@ export function createWorkerCommand(program: Command): Command {
             },
           });
 
-          const appServer = await startAppServer(docService, pipeline, config);
+          const appServer = await startAppServer(docService, pipeline, eventBus, config);
 
           // Register for graceful shutdown
           // Note: pipeline is managed by AppServer, so don't register it globally
