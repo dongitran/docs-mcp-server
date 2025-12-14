@@ -9,7 +9,12 @@ import fastifyStatic from "@fastify/static";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import { WebSocketServer } from "ws";
-import { ProxyAuthManager } from "../auth";
+import {
+  createWebAuthMiddleware,
+  ProxyAuthManager,
+  registerAuthRoutes,
+  WebAuthManager,
+} from "../auth";
 import type { EventBusService } from "../events";
 import { RemoteEventProxy } from "../events/RemoteEventProxy";
 import type { IPipeline } from "../pipeline/trpc/interfaces";
@@ -31,6 +36,7 @@ export class AppServer {
   private server: FastifyInstance;
   private mcpServer: McpServer | null = null;
   private authManager: ProxyAuthManager | null = null;
+  private webAuthManager: WebAuthManager | null = null;
   private config: AppServerConfig;
   private remoteEventProxy: RemoteEventProxy | null = null;
   private wss: WebSocketServer | null = null;
@@ -380,8 +386,22 @@ export class AppServer {
    * Enable web interface service.
    */
   private async enableWebInterface(): Promise<void> {
+    // Register auth routes if auth is enabled
+    if (this.config.auth?.enabled && this.webAuthManager) {
+      registerAuthRoutes(this.server, this.webAuthManager, this.config.auth);
+
+      // Add web auth middleware for protected routes
+      const webAuthMiddleware = createWebAuthMiddleware(
+        this.webAuthManager,
+        this.config.auth,
+      );
+      this.server.addHook("preHandler", webAuthMiddleware);
+      logger.debug("Web authentication middleware enabled");
+    }
+
     await registerWebService(this.server, this.docService, this.pipeline, this.eventBus, {
       externalWorkerUrl: this.config.externalWorkerUrl,
+      authEnabled: this.config.auth?.enabled,
     });
 
     logger.debug("Web interface service enabled");
@@ -469,9 +489,15 @@ export class AppServer {
       return;
     }
 
+    // Initialize MCP auth manager (for API endpoints)
     this.authManager = new ProxyAuthManager(this.config.auth);
     await this.authManager.initialize();
     logger.debug("Proxy auth manager initialized");
+
+    // Initialize Web auth manager (for browser-based login)
+    this.webAuthManager = new WebAuthManager(this.config.auth);
+    await this.webAuthManager.initialize();
+    logger.debug("Web auth manager initialized");
   }
 
   /**

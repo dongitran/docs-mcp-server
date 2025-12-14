@@ -7,7 +7,10 @@
 
 export { createAuthMiddleware } from "./middleware";
 export { ProxyAuthManager } from "./ProxyAuthManager";
-export type {
-  AuthConfig,
-  AuthContext,
-} from "./types";
+export type { AuthConfig, AuthContext } from "./types";
+export type { WebAuthSession } from "./webAuth";
+export {
+  createWebAuthMiddleware,
+  registerAuthRoutes,
+  WebAuthManager,
+} from "./webAuth";

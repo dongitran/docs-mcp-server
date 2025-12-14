@@ -19,6 +19,8 @@ interface LayoutProps extends PropsWithChildren {
     useRemoteWorker: boolean;
     trpcUrl?: string;
   };
+  /** Whether authentication is enabled */
+  authEnabled?: boolean;
 }
 
 /**
@@ -31,6 +33,7 @@ const Layout = ({
   version,
   children,
   eventClientConfig,
+  authEnabled,
 }: LayoutProps) => {
   // Use provided version prop, or fall back to build-time injected version
   const versionString = version || __APP_VERSION__;
@@ -176,7 +179,7 @@ const Layout = ({
                   </span>
                 ) : null}
               </div>
-              <div>
+              <div class="flex items-center gap-4">
                 <span
                   x-show="hasUpdate"
                   x-cloak
@@ -196,6 +199,38 @@ const Layout = ({
                     <span class="mr-1">Update available</span>
                   </a>
                 </span>
+                {/* User menu for authenticated users */}
+                {authEnabled && (
+                  <div x-data="userMenu()" x-init="fetchUser()" class="relative">
+                    <button
+                      x-show="user"
+                      x-cloak
+                      type="button"
+                      class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors"
+                      x-on:click="open = !open"
+                    >
+                      <span class="w-8 h-8 rounded-full bg-primary-500 flex items-center justify-center text-white font-medium text-sm">
+                        <span x-text="user?.name?.charAt(0) || user?.email?.charAt(0) || '?'"></span>
+                      </span>
+                      <span x-text="user?.name || user?.email || 'User'" class="hidden md:inline"></span>
+                    </button>
+                    <div
+                      x-show="open"
+                      x-cloak
+                      {...{ "x-on:click.away": "open = false" }}
+                      class="absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white dark:bg-gray-700 ring-1 ring-black ring-opacity-5 z-50"
+                    >
+                      <div class="py-1">
+                        <div class="px-4 py-2 text-sm text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-600">
+                          <div x-text="user?.email || ''"></div>
+                        </div>
+                        <a href="/auth/logout" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600">
+                          Sign out
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 

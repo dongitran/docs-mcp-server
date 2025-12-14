@@ -11,6 +11,8 @@ export interface AuthConfig {
   issuerUrl?: string;
   /** JWT audience claim (identifies this protected resource) */
   audience?: string;
+  /** OAuth2 client ID (defaults to audience if not specified) */
+  clientId?: string;
   /** Standard OAuth2 scopes (e.g., "openid", "profile", "email") */
   scopes: string[];
 }

@@ -99,6 +99,30 @@ document.addEventListener("alpine:init", () => {
   }));
 });
 
+// User menu component for authenticated users
+Alpine.data("userMenu", () => ({
+  open: false,
+  user: null as {
+    sub?: string;
+    email?: string;
+    name?: string;
+    preferred_username?: string;
+  } | null,
+  async fetchUser() {
+    try {
+      const response = await fetch("/auth/me");
+      if (response.ok) {
+        const data = await response.json();
+        if (data.authenticated) {
+          this.user = data.user;
+        }
+      }
+    } catch (error) {
+      console.debug("Failed to fetch user info", error);
+    }
+  },
+}));
+
 // Initialize toast store for global notifications
 Alpine.store("toast", {
   visible: false,

@@ -252,6 +252,7 @@ export function parseAuthConfig(options: {
   authEnabled?: boolean;
   authIssuerUrl?: string;
   authAudience?: string;
+  authClientId?: string;
 }): AuthConfig | undefined {
   // Check if auth is enabled via CLI flag (environment variables handled by commander)
   if (!options.authEnabled) {
@@ -262,7 +263,8 @@ export function parseAuthConfig(options: {
     enabled: true,
     issuerUrl: options.authIssuerUrl,
     audience: options.authAudience,
-    scopes: ["openid", "profile"], // Default scopes for OAuth2/OIDC
+    clientId: options.authClientId || process.env.DOCS_MCP_AUTH_CLIENT_ID,
+    scopes: ["openid", "profile", "email"], // Default scopes for OAuth2/OIDC
   };
 }
 

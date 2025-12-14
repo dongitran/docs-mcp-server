@@ -9,7 +9,7 @@ import Layout from "../components/Layout";
  */
 export function registerIndexRoute(
   server: FastifyInstance,
-  config?: { externalWorkerUrl?: string }
+  config?: { externalWorkerUrl?: string; authEnabled?: boolean }
 ) {
   server.get("/", async (_, reply) => {
     reply.type("text/html");
@@ -30,6 +30,7 @@ export function registerIndexRoute(
             useRemoteWorker,
             trpcUrl,
           }}
+          authEnabled={config?.authEnabled}
         >
           {/* Analytics Section */}
           <div

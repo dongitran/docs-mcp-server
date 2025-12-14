@@ -36,7 +36,7 @@ export async function registerWebService(
   docService: IDocumentManagement,
   pipeline: IPipeline,
   eventBus: EventBusService,
-  config?: { externalWorkerUrl?: string },
+  config?: { externalWorkerUrl?: string; authEnabled?: boolean },
 ): Promise<void> {
   // Note: Web interface uses direct event tracking without session management
   // This approach provides meaningful analytics without the complexity of per-request sessions
