@@ -74,21 +74,21 @@ function generateState(): string {
 
 /**
  * Get the external base URL from request, respecting X-Forwarded-* headers from reverse proxy.
- * Falls back to HTTPS if host contains a domain (non-localhost).
+ * Always uses HTTPS for non-localhost domains (production).
  */
 function getExternalBaseUrl(request: FastifyRequest): string {
-  const forwardedProto = request.headers["x-forwarded-proto"] as string | undefined;
   const forwardedHost = request.headers["x-forwarded-host"] as string | undefined;
-
   const host = forwardedHost || request.headers.host || "localhost";
 
-  // Determine protocol: use forwarded header, or default to https for non-localhost
-  let protocol = forwardedProto || request.protocol;
-  if (!forwardedProto && !host.startsWith("localhost") && !host.startsWith("127.0.0.1")) {
-    protocol = "https";
-  }
+  // Always use HTTPS for non-localhost domains (production behind ingress)
+  const isLocalhost = host.startsWith("localhost") || host.startsWith("127.0.0.1");
+  const protocol = isLocalhost ? "http" : "https";
 
-  return `${protocol}://${host}`;
+  const baseUrl = `${protocol}://${host}`;
+  logger.debug(
+    `getExternalBaseUrl: host=${host}, isLocalhost=${isLocalhost}, baseUrl=${baseUrl}`,
+  );
+  return baseUrl;
 }
 
 /**
