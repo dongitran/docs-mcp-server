@@ -30,10 +30,10 @@ const UserMenu = ({ authEnabled }: UserMenuProps) => {
         class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors"
         x-on:click="open = !open"
       >
-        <span class="w-8 h-8 rounded-full bg-primary-500 flex items-center justify-center text-white font-medium text-sm">
-          <span x-text="user?.name?.charAt(0) || user?.email?.charAt(0) || '?'"></span>
+        <span class="w-8 h-8 rounded-full bg-primary-500 flex items-center justify-center text-white font-medium text-sm uppercase">
+          <span x-text="user?.name?.charAt(0) || user?.preferred_username?.charAt(0) || user?.email?.charAt(0) || user?.sub?.charAt(0) || '?'"></span>
         </span>
-        <span x-text="user?.name || user?.email || 'User'" class="hidden md:inline"></span>
+        <span x-text="user?.name || user?.preferred_username || user?.email || 'User'" class="hidden md:inline"></span>
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
         </svg>
