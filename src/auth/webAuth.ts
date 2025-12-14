@@ -73,6 +73,19 @@ function generateState(): string {
 }
 
 /**
+ * Get the external base URL from request, respecting X-Forwarded-* headers from reverse proxy.
+ */
+function getExternalBaseUrl(request: FastifyRequest): string {
+  const forwardedProto = request.headers["x-forwarded-proto"] as string | undefined;
+  const forwardedHost = request.headers["x-forwarded-host"] as string | undefined;
+
+  const protocol = forwardedProto || request.protocol;
+  const host = forwardedHost || request.headers.host;
+
+  return `${protocol}://${host}`;
+}
+
+/**
  * Parse cookies from header string into key-value pairs.
  */
 function parseCookies(cookieHeader: string | undefined): Record<string, string> {
@@ -461,7 +474,7 @@ export function registerAuthRoutes(
       redirectAfterLogin = "/";
     }
 
-    const baseUrl = `${request.protocol}://${request.headers.host}`;
+    const baseUrl = getExternalBaseUrl(request);
     const callbackUrl = `${baseUrl}/auth/callback`;
     const state = `${generateState()}:${Buffer.from(redirectAfterLogin).toString("base64")}`;
 
@@ -486,7 +499,7 @@ export function registerAuthRoutes(
     }
 
     try {
-      const baseUrl = `${request.protocol}://${request.headers.host}`;
+      const baseUrl = getExternalBaseUrl(request);
       const callbackUrl = `${baseUrl}/auth/callback`;
 
       // Extract redirect URL from state
@@ -522,7 +535,7 @@ export function registerAuthRoutes(
   // Logout route - clears session and redirects to Keycloak logout
   server.get("/auth/logout", async (request, reply) => {
     const session = parseSessionCookie(request.headers.cookie);
-    const baseUrl = `${request.protocol}://${request.headers.host}`;
+    const baseUrl = getExternalBaseUrl(request);
 
     // Clear session cookie
     reply.header("Set-Cookie", createLogoutCookie());
